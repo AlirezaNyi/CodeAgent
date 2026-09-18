@@ -1,0 +1,18 @@
+[package]
+name = "raya-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Policy engine for RAYA Agent tool execution"
+
+[dependencies]
+raya-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
