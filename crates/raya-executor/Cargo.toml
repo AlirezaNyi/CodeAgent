@@ -1,0 +1,19 @@
+[package]
+name = "raya-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded process executor for RAYA Agent"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true
