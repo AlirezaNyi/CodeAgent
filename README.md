@@ -6,7 +6,9 @@ Cursor remains the editor UI. RAYA owns orchestration, bounded context, tools, p
 
 ## Status
 
-Phase 1 (MVP vertical slice) is under active development.
+Phase 1 (MVP vertical slice) is implemented:
+
+`raya agent run` → SQLite task → plan → context → mock/OpenAI LLM → tools → verify → events.
 
 ## Requirements
 
@@ -18,37 +20,44 @@ Phase 1 (MVP vertical slice) is under active development.
 
 ```bash
 # Build
-cargo build -p raya-cli
+cargo build -p raya-cli --release
 
-# Discover project + show CLI help
+# Help
 cargo run -p raya-cli -- --help
 
-# Example (agent run lands in later tasks)
-cargo run -p raya-cli -- agent run "add validation to the login endpoint"
+# Run with the offline mock LLM (default)
+cargo run -p raya-cli -- agent run "Write a hello.txt file"
+
+# Status / logs
+cargo run -p raya-cli -- agent status
+cargo run -p raya-cli -- agent logs <task-id>
+
+# Local HTTP API (127.0.0.1:7319)
+cargo run -p raya-cli -- serve
 ```
 
 Copy [`.raya/config.toml.example`](.raya/config.toml.example) to `.raya/config.toml` to customize limits, policy, and LLM provider.
+
+Set `RAYA_LLM_API_KEY` (or `OPENAI_API_KEY`) when `llm.provider = "openai"`.
 
 ## Workspace layout
 
 ```text
 crates/
-  raya-core/     # config, errors, discovery, redaction
-  raya-cli/      # `raya` binary
-docs/            # PRD, RFC, SRS, ADRs
-prompts/         # implementation / system prompts
-.raya/           # project config example + rules
+  raya-core/       # config, errors, models, discovery
+  raya-store/      # SQLite persistence
+  raya-executor/   # bounded process runner
+  raya-policy/     # risk classification / approval
+  raya-tools/      # filesystem, search, git, shell, test/build
+  raya-llm/        # mock + OpenAI-compatible providers
+  raya-context/    # search → rank → token budget
+  raya-agent/      # orchestrator loop + resource manager
+  raya-protocol/   # localhost HTTP API
+  raya-cli/        # `raya` binary
+docs/              # PRD, RFC, SRS, ADRs
+prompts/           # system / planner prompts
+.raya/             # config example + rules
 ```
-
-Further crates (`raya-store`, `raya-tools`, `raya-agent`, …) are added as Phase 1 tasks land.
-
-## Documentation
-
-- [Product Requirements (PRD)](docs/PRD.md)
-- [Architecture (RFC)](docs/RFC.md)
-- [Software Requirements (SRS)](docs/SRS.md)
-- [Architecture Decision Records](docs/adr/)
-- [Implementation prompt](prompts/IMPLEMENTATION_PROMPT.md)
 
 ## Development
 
