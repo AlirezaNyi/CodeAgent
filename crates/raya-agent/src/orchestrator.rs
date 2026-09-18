@@ -159,6 +159,12 @@ impl Orchestrator {
         let mut pending_approval: Option<ToolCall>;
         let mut review_rounds: u32;
         let resuming = task.phase == TaskPhase::WaitingApproval;
+        if !resuming && task.phase != TaskPhase::Created {
+            return Err(OrchestratorError::Message(format!(
+                "cannot run task in phase {phase:?}; expected created or waiting_approval",
+                phase = task.phase
+            )));
+        }
 
         if resuming {
             let cp = self.store.load_checkpoint(task_id)?.ok_or_else(|| {
@@ -596,7 +602,11 @@ impl Orchestrator {
                 tool_call_id: m.tool_call_id.clone(),
             })
             .collect();
-        let mut cp = TaskCheckpoint::new(task_id, capped, pending_call);
+        let pending = pending_call.map(|mut call| {
+            call.input = redact_json_value(&call.input);
+            call
+        });
+        let mut cp = TaskCheckpoint::new(task_id, capped, pending);
         cp.review_rounds = review_rounds;
         self.store.save_checkpoint(&cp)?;
         Ok(())
@@ -664,8 +674,13 @@ impl Orchestrator {
                 files.join(", ")
             )
         };
-        let mem = MemoryRecord::new(task.project_id, MemoryKind::Task, content, Some(task.id))
-            .with_key("task_summary");
+        let mem = MemoryRecord::new(
+            task.project_id,
+            MemoryKind::Task,
+            redact_secrets(&content),
+            Some(task.id),
+        )
+        .with_key("task_summary");
         if let Err(e) = self.store.upsert_memory(&mem) {
             warn!(error = %e, "failed to record task memory");
         }
@@ -681,7 +696,10 @@ impl Orchestrator {
             .map(|s| format!("{}: {}", s.id, s.description))
             .collect();
         let summary = plan.summary.clone().unwrap_or_default();
-        let content = format!("Plan summary: {summary}\nSteps:\n{}", steps.join("\n"));
+        let content = redact_secrets(&format!(
+            "Plan summary: {summary}\nSteps:\n{}",
+            steps.join("\n")
+        ));
         let mem = MemoryRecord::new(
             task.project_id,
             MemoryKind::Decision,
@@ -916,6 +934,21 @@ impl Orchestrator {
             ))?;
         }
         Ok(task)
+    }
+}
+
+fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => serde_json::Value::String(redact_secrets(s)),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_json_value).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), redact_json_value(v)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 

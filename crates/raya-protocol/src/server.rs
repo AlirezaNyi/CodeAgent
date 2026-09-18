@@ -243,10 +243,21 @@ async fn approve_task(
         .call_id
         .parse()
         .map_err(|_| ApiError::bad("invalid call_id"))?;
-    let _ = state
+    let task = state
         .store
         .get_task(tid)?
         .ok_or_else(|| ApiError::not_found("task not found"))?;
+    if task.phase != TaskPhase::WaitingApproval {
+        return Err(ApiError::bad("task is not waiting for approval"));
+    }
+    let cp = state
+        .store
+        .load_checkpoint(tid)?
+        .ok_or_else(|| ApiError::bad("no checkpoint for task"))?;
+    let pending_id = cp.pending_call.as_ref().map(|c| c.id);
+    if pending_id != Some(cid) {
+        return Err(ApiError::bad("call_id does not match pending approval"));
+    }
     state.store.set_approval(tid, cid, body.granted)?;
 
     let cancel = CancellationToken::new();

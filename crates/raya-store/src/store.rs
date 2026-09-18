@@ -567,7 +567,7 @@ impl Store {
         limit: u32,
     ) -> StoreResult<Vec<MemoryRecord>> {
         let conn = self.lock()?;
-        let limit = limit as i64;
+        let limit = limit.clamp(1, 100) as i64;
         let mut out = Vec::new();
         if let Some(k) = kind {
             let mut stmt = conn.prepare(
@@ -607,7 +607,7 @@ impl Store {
         limit: u32,
     ) -> StoreResult<Vec<MemoryRecord>> {
         let conn = self.lock()?;
-        let limit = limit as i64;
+        let limit = limit.clamp(1, 100) as i64;
         let q = fts_query(query);
         let mut out = Vec::new();
         if q.is_empty() {
@@ -621,13 +621,10 @@ impl Store {
              ORDER BY m.updated_at DESC
              LIMIT ?3",
         )?;
-        match stmt.query_map(params![project_id.to_string(), q, limit], map_memory) {
-            Ok(rows) => {
-                for row in rows {
-                    out.push(row?);
-                }
+        if let Ok(rows) = stmt.query_map(params![project_id.to_string(), q, limit], map_memory) {
+            for row in rows {
+                out.push(row?);
             }
-            Err(_) => {}
         }
         if out.is_empty() {
             let like = format!("%{}%", query.trim());

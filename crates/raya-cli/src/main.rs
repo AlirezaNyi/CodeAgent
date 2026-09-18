@@ -322,6 +322,22 @@ async fn run() -> Result<ExitCode> {
             } => {
                 let tid: TaskId = task_id.parse().context("task id")?;
                 let cid: ToolCallId = call_id.parse().context("call id")?;
+                let task = store
+                    .get_task(tid)?
+                    .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+                if task.phase != TaskPhase::WaitingApproval {
+                    anyhow::bail!("task is not waiting for approval (phase={:?})", task.phase);
+                }
+                let cp = store
+                    .load_checkpoint(tid)?
+                    .ok_or_else(|| anyhow::anyhow!("no checkpoint for task; cannot approve"))?;
+                let pending_id = cp.pending_call.as_ref().map(|c| c.id);
+                if pending_id != Some(cid) {
+                    anyhow::bail!(
+                        "call_id does not match pending approval (expected {:?})",
+                        pending_id
+                    );
+                }
                 let granted = !deny;
                 store.set_approval(tid, cid, granted)?;
                 if cli.json {
