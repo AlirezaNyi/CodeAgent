@@ -11,6 +11,8 @@ use ignore::WalkBuilder;
 
 use crate::rank::RankedCandidate;
 
+type HitMap = BTreeMap<String, (usize, Vec<String>)>;
+
 const STOP: &[&str] = &[
     "a", "an", "the", "to", "and", "or", "of", "in", "on", "for", "with", "is", "are", "be",
     "this", "that", "it", "as", "at", "by", "from", "add", "update", "fix", "please",
@@ -51,8 +53,7 @@ pub fn search_candidates(
         Err(_) => return Vec::new(),
     };
 
-    let hits: Arc<Mutex<BTreeMap<String, (usize, Vec<String>)>>> =
-        Arc::new(Mutex::new(BTreeMap::new()));
+    let hits: Arc<Mutex<HitMap>> = Arc::new(Mutex::new(BTreeMap::new()));
     let mut searcher = Searcher::new();
     let mut builder = WalkBuilder::new(root);
     builder.hidden(false).git_ignore(true);
@@ -106,6 +107,9 @@ pub fn search_candidates(
                 preview_lines: snippets.clone(),
                 score: 0.0,
                 explanation: Default::default(),
+                symbol_match: false,
+                git_recent: false,
+                fts_match: false,
             }
         })
         .collect();
@@ -139,6 +143,9 @@ pub fn search_candidates(
                     preview_lines: Vec::new(),
                     score: 0.0,
                     explanation: Default::default(),
+                    symbol_match: false,
+                    git_recent: false,
+                    fts_match: false,
                 });
             }
         }

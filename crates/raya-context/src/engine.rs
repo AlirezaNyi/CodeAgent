@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
-use crate::rank::{RankExplanation, rank};
+use crate::rank::{RankExplanation, RankSignals, rank};
 use crate::search::{extract_keywords, search_candidates};
 
 #[derive(Debug, Error)]
@@ -52,9 +52,18 @@ impl ContextEngine {
     }
 
     pub fn build(&self, root: &Path, request: &str) -> Result<ContextBundle, ContextError> {
+        self.build_with_signals(root, request, &RankSignals::default())
+    }
+
+    pub fn build_with_signals(
+        &self,
+        root: &Path,
+        request: &str,
+        signals: &RankSignals,
+    ) -> Result<ContextBundle, ContextError> {
         let keywords = extract_keywords(request);
         let candidates = search_candidates(root, &keywords, self.max_files);
-        let ranked = rank(candidates, &keywords);
+        let ranked = rank(candidates, &keywords, signals);
 
         let mut snippets = Vec::new();
         let mut dropped = Vec::new();

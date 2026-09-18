@@ -7,4 +7,4 @@ mod rank;
 mod search;
 
 pub use engine::{ContextBundle, ContextEngine, ContextError, ContextSnippet};
-pub use rank::{RankExplanation, RankedCandidate};
+pub use rank::{RankExplanation, RankSignals, RankedCandidate};
