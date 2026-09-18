@@ -209,10 +209,10 @@ The system shall support bounded, ephemeral subagents.
 Different task phases shall be able to use different LLM providers/models.
 
 ### FR-013 Memory
-The system shall persist useful task/project/decision memory locally.
+The system shall persist useful task/project/decision memory locally (Slice B / ADR 0012: kinds task|project|decision|agent, FTS recall bounded by `[memory]`).
 
 ### FR-014 Policy
-Sensitive operations shall require configurable approval.
+Sensitive operations shall require configurable approval. Approval pauses shall resume across process boundaries via persisted checkpoints (ADR 0012).
 
 ### FR-015 Resource limits
 The system shall enforce configurable limits for memory, processes, tools, agents, iterations, and tokens.

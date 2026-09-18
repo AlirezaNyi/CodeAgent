@@ -25,5 +25,5 @@ Phase 1–2 delivered the vertical slice, index/ranking, and named LLM lanes (AD
 ## Consequences
 - Config expands: `[models]`, extended `[subagent]` fields; CLI gains `raya agent llm routes`.
 - `AppState` holds `ModelRouter` instead of a bare `LlmProvider`.
-- Known limitations remain: in-memory `pending_approval` across process boundaries; `add_tokens` hard-ceiling errors still ignored with `let _ =` (pre-existing).
-- Follow-ups: Memory (migration 0003), MCP, DAG, durable approval resume.
+- Known limitations remain: `add_tokens` hard-ceiling errors still ignored with `let _ =` (pre-existing).
+- Follow-ups delivered in ADR 0012: Memory (migration 0003), durable approval resume. MCP and DAG remain later.

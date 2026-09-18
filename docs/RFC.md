@@ -351,7 +351,9 @@ Each subagent gets:
 
 Do not duplicate the complete parent context.
 
-**Slice A (ADR 0011):** implemented in-process under `raya-agent::subagent` with role allowlists, `ModelRouter` over named lanes, deterministic `review_on_finish` / `debug_on_verify_fail` (default off), and LLM `AgentDecision::Delegate`. Full DAG / Memory / MCP remain later Phase 3 slices.
+**Slice A (ADR 0011):** implemented in-process under `raya-agent::subagent` with role allowlists, `ModelRouter` over named lanes, deterministic `review_on_finish` / `debug_on_verify_fail` (default off), and LLM `AgentDecision::Delegate`.
+
+**Slice B (ADR 0012):** durable approval checkpoints + resume across processes; SQLite Memory (`task` / `project` / `decision` / `agent`) with bounded FTS recall. Full DAG / MCP remain later Phase 3 slices.
 
 ## 13. Execution DAG
 
@@ -410,18 +412,22 @@ summary   → cheap
 **Slice A:** `[models]` maps these roles to `[[llm.lanes]]` names via `raya-llm::ModelRouter` (ADR 0011). Empty values use the active lane.
 ## 15. Memory
 
-SQLite-backed memory categories:
+SQLite-backed memory categories (migration `0003`, ADR 0012):
 
 ```text
-task_memory
-project_memory
-decision_memory
-agent_memory
+task     — completed-task summary + request + modified files
+project  — operator-curated project facts (`raya agent memory add`)
+decision — plan summaries written on PlanCreated
+agent    — reserved for future agent-scoped notes
 ```
 
-Memory should be retrieved selectively.
+Tables: `memories` + FTS5 `memories_fts`. Config `[memory] enabled / max_items / max_tokens`.
+
+Retrieval: `Store::search_memories` (FTS, LIKE fallback) injected in ContextBuilding as a capped `## Project memory` block. Payload `context.retrieved.memories: [{id, kind}]`.
 
 Never dump all historical memory into the prompt.
+
+Durable approval (same migration): `task_checkpoints` stores redacted messages + pending tool call; CLI/HTTP approve resumes a new orchestrator process.
 
 ## 16. Event Store
 
@@ -443,6 +449,8 @@ test.passed
 agent.spawned
 agent.completed
 approval.requested
+approval.granted
+approval.denied
 task.completed
 task.failed
 task.cancelled
