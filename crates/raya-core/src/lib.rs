@@ -12,8 +12,8 @@ pub mod tokens;
 pub mod tracing_init;
 
 pub use config::{
-    AgentConfig, Config, ContextConfig, GitConfig, LlmConfig, LlmLane, PolicyAction, PolicyConfig,
-    ResolvedLlmLane, ResourcesConfig, ServerConfig, SubagentConfig,
+    AgentConfig, Config, ContextConfig, GitConfig, LlmConfig, LlmLane, ModelsConfig, PolicyAction,
+    PolicyConfig, ResolvedLlmLane, ResourcesConfig, ServerConfig, SubagentConfig,
 };
 pub use error::{ConfigError, RayaError, Result};
 pub use models::*;

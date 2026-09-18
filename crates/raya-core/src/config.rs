@@ -19,6 +19,8 @@ pub struct Config {
     pub git: GitConfig,
     pub resources: ResourcesConfig,
     pub llm: LlmConfig,
+    /// Phase/role → named lane mapping (empty string = active lane).
+    pub models: ModelsConfig,
     pub server: ServerConfig,
 }
 
@@ -81,6 +83,26 @@ impl Config {
                 ConfigError::Validation("subagent.max_parallel must be >= 1".into()).into(),
             );
         }
+        if self.subagent.max_iterations == 0 {
+            return Err(
+                ConfigError::Validation("subagent.max_iterations must be >= 1".into()).into(),
+            );
+        }
+        if self.subagent.max_tool_calls == 0 {
+            return Err(
+                ConfigError::Validation("subagent.max_tool_calls must be >= 1".into()).into(),
+            );
+        }
+        if self.subagent.timeout_seconds == 0 {
+            return Err(
+                ConfigError::Validation("subagent.timeout_seconds must be >= 1".into()).into(),
+            );
+        }
+        if self.subagent.max_review_rounds == 0 {
+            return Err(
+                ConfigError::Validation("subagent.max_review_rounds must be >= 1".into()).into(),
+            );
+        }
         if self.resources.max_parallel_tools == 0 {
             return Err(ConfigError::Validation(
                 "resources.max_parallel_tools must be >= 1".into(),
@@ -110,6 +132,7 @@ impl Config {
             .into());
         }
         self.llm.validate_lanes()?;
+        self.models.validate_against_lanes(&self.llm)?;
         Ok(())
     }
 
@@ -194,11 +217,92 @@ impl Default for ContextConfig {
 #[serde(default)]
 pub struct SubagentConfig {
     pub max_parallel: u32,
+    pub max_iterations: u32,
+    pub max_tool_calls: u32,
+    pub timeout_seconds: u64,
+    pub max_review_rounds: u32,
+    /// When true, spawn a Reviewer subagent after successful verification.
+    pub review_on_finish: bool,
+    /// When true, spawn a Debugger subagent after failed verification.
+    pub debug_on_verify_fail: bool,
 }
 
 impl Default for SubagentConfig {
     fn default() -> Self {
-        Self { max_parallel: 3 }
+        Self {
+            max_parallel: 3,
+            max_iterations: 6,
+            max_tool_calls: 15,
+            timeout_seconds: 300,
+            max_review_rounds: 1,
+            review_on_finish: false,
+            debug_on_verify_fail: false,
+        }
+    }
+}
+
+/// Maps task phases / subagent roles to named LLM lanes.
+///
+/// Empty string means "use the active lane" (`llm.lane` / legacy top-level).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ModelsConfig {
+    pub planning: String,
+    pub coding: String,
+    pub review: String,
+    pub debug: String,
+    pub summary: String,
+}
+
+impl ModelsConfig {
+    /// All role → lane-name pairs (for iteration / CLI display).
+    pub fn role_lanes(&self) -> [(&'static str, &str); 5] {
+        [
+            ("planning", &self.planning),
+            ("coding", &self.coding),
+            ("review", &self.review),
+            ("debug", &self.debug),
+            ("summary", &self.summary),
+        ]
+    }
+
+    fn validate_against_lanes(&self, llm: &LlmConfig) -> Result<()> {
+        for (role, lane_name) in self.role_lanes() {
+            if lane_name.is_empty() {
+                continue;
+            }
+            if llm.lanes.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "models.{role} = \"{lane_name}\" but llm.lanes is empty; \
+                     use empty string for the active/legacy lane"
+                ))
+                .into());
+            }
+            if !llm.lanes.iter().any(|l| l.name == *lane_name) {
+                return Err(ConfigError::Validation(format!(
+                    "models.{role} lane \"{lane_name}\" not found in llm.lanes"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the lane name for a role (empty → active lane name).
+    pub fn lane_for_role(&self, role: &str, active_lane: &str) -> String {
+        let named = match role {
+            "planning" => self.planning.as_str(),
+            "coding" => self.coding.as_str(),
+            "review" => self.review.as_str(),
+            "debug" => self.debug.as_str(),
+            "summary" => self.summary.as_str(),
+            _ => "",
+        };
+        if named.is_empty() {
+            active_lane.to_string()
+        } else {
+            named.to_string()
+        }
     }
 }
 
@@ -531,5 +635,98 @@ model = "local-model"
         let resolved = c.llm.resolve_lane().unwrap();
         assert_eq!(resolved.name, "default");
         assert_eq!(resolved.base_url, c.llm.base_url);
+    }
+
+    #[test]
+    fn rejects_zero_subagent_iterations() {
+        let mut c = Config::default();
+        c.subagent.max_iterations = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_models_lane_when_lanes_empty() {
+        let mut c = Config::default();
+        c.models.coding = "ollama".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_models_lane() {
+        let mut c = Config::default();
+        c.llm.provider = "local".into();
+        c.llm.lanes = vec![LlmLane {
+            name: "ollama".into(),
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "llama3.2".into(),
+            api_key_env: None,
+        }];
+        c.models.review = "missing".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_models_lane_when_present() {
+        let mut c = Config::default();
+        c.llm.provider = "local".into();
+        c.llm.lanes = vec![
+            LlmLane {
+                name: "ollama".into(),
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                model: "llama3.2".into(),
+                api_key_env: None,
+            },
+            LlmLane {
+                name: "strong".into(),
+                base_url: "http://127.0.0.1:1234/v1".into(),
+                model: "coder".into(),
+                api_key_env: None,
+            },
+        ];
+        c.models.coding = "strong".into();
+        c.models.planning = "ollama".into();
+        c.validate().expect("models lanes ok");
+        assert_eq!(c.models.lane_for_role("coding", "ollama"), "strong");
+        assert_eq!(c.models.lane_for_role("review", "ollama"), "ollama");
+    }
+
+    #[test]
+    fn parses_subagent_extended_fields() {
+        let text = r#"
+[subagent]
+max_parallel = 2
+max_iterations = 4
+max_tool_calls = 10
+timeout_seconds = 120
+max_review_rounds = 2
+review_on_finish = true
+debug_on_verify_fail = true
+
+[models]
+coding = "strong"
+review = "cheap"
+
+[llm]
+provider = "local"
+lane = "cheap"
+
+[[llm.lanes]]
+name = "cheap"
+base_url = "http://127.0.0.1:11434/v1"
+model = "small"
+
+[[llm.lanes]]
+name = "strong"
+base_url = "http://127.0.0.1:1234/v1"
+model = "large"
+"#;
+        let cfg = Config::from_toml(text, Path::new("test.toml")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.subagent.max_parallel, 2);
+        assert_eq!(cfg.subagent.max_iterations, 4);
+        assert!(cfg.subagent.review_on_finish);
+        assert!(cfg.subagent.debug_on_verify_fail);
+        assert_eq!(cfg.models.coding, "strong");
+        assert_eq!(cfg.models.review, "cheap");
     }
 }

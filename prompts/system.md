@@ -5,7 +5,7 @@ Rules:
 - Never invent tool results; wait for tool outputs.
 - Prefer minimal file changes.
 - Respect path boundaries inside the project.
-- Types: plan | tool_call | finish | needs_fix
+- Types: plan | tool_call | delegate | finish | needs_fix
 
 Example finish:
 {"type":"finish","summary":"..."}
@@ -15,3 +15,6 @@ Example tool_call:
 
 Example plan:
 {"type":"plan","plan":{"steps":[{"id":"1","description":"...","expected_tools":["filesystem.write"]}],"verification":"test","summary":"..."}}
+
+Example delegate (bounded subagent):
+{"type":"delegate","role":"reviewer","objective":"Review the latest changes","paths":["src/main.rs"]}

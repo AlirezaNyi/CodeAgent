@@ -5,13 +5,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use raya_agent::Orchestrator;
 use raya_core::{
     AgentTask, Config, LogFormat, TaskId, TaskPhase, ToolCallId, discover, init_tracing,
 };
-use raya_llm::{LlmProvider, MockProvider, OpenAiCompatibleProvider};
+use raya_llm::{ModelRole, ModelRouter, OpenAiCompatibleProvider};
 use raya_policy::PolicyEngine;
 use raya_protocol::{AppState, serve};
 use raya_store::Store;
@@ -98,6 +98,8 @@ enum AgentCommands {
 enum LlmCommands {
     /// List configured LLM lanes (and the active selection).
     Lanes,
+    /// Show role → lane/model routing table.
+    Routes,
     /// Probe `GET {base_url}/models` on the active (or named) lane.
     Probe {
         /// Override lane name for this probe.
@@ -140,7 +142,7 @@ async fn run() -> Result<ExitCode> {
     let store = Arc::new(Store::open(&db_path).context("open store")?);
     let policy = PolicyEngine::new(config.policy.clone());
     let tools = Arc::new(default_registry(policy));
-    let llm = build_llm(&config)?;
+    let router = build_router(&config)?;
 
     let project_rec = store.get_or_create_project(
         project.path(),
@@ -170,10 +172,10 @@ async fn run() -> Result<ExitCode> {
                 let id = agent_task.id;
                 store.create_task(&agent_task)?;
 
-                let orch = Orchestrator::new(
+                let orch = Orchestrator::with_router(
                     store.clone(),
                     tools,
-                    llm,
+                    router.clone(),
                     config.clone(),
                     project.path().to_path_buf(),
                 );
@@ -381,9 +383,10 @@ async fn run() -> Result<ExitCode> {
                 let request = format!("Explain the file {}", file.display());
                 let bundle = engine.build(project.path(), &request)?;
                 let context = engine.render_prompt(&bundle);
-                let resp = llm
+                let resp = router
+                    .provider_for(ModelRole::Summary)
                     .complete(raya_core::CompletionRequest {
-                        model: config.llm.model.clone(),
+                        model: router.model_for(ModelRole::Summary),
                         messages: vec![
                             raya_core::Message::system(
                                 "Explain the following code clearly and briefly.",
@@ -411,6 +414,7 @@ async fn run() -> Result<ExitCode> {
             }
             AgentCommands::Llm { command } => match command {
                 LlmCommands::Lanes => cmd_llm_lanes(&config, cli.json),
+                LlmCommands::Routes => cmd_llm_routes(&router, &config, cli.json),
                 LlmCommands::Probe { lane } => {
                     cmd_llm_probe(&config, lane.as_deref(), cli.json).await
                 }
@@ -426,7 +430,7 @@ async fn run() -> Result<ExitCode> {
             let state = AppState {
                 store,
                 tools,
-                llm,
+                router: router.clone(),
                 config: config.clone(),
                 project_root: project.path().to_path_buf(),
                 started: Instant::now(),
@@ -441,21 +445,44 @@ async fn run() -> Result<ExitCode> {
     }
 }
 
-fn build_llm(config: &Config) -> Result<Arc<dyn LlmProvider>> {
-    match config.llm.provider.to_ascii_lowercase().as_str() {
-        "mock" => Ok(Arc::new(MockProvider::default_script())),
-        "openai" | "local" => {
-            let lane = config.llm.resolve_lane().map_err(|e| anyhow::anyhow!(e))?;
-            let provider = OpenAiCompatibleProvider::from_resolved(
-                &lane,
-                config.llm.timeout_seconds,
-                CancellationToken::new(),
-            )
-            .map_err(|e| anyhow::anyhow!(e))?;
-            Ok(Arc::new(provider))
+fn build_router(config: &Config) -> Result<Arc<ModelRouter>> {
+    ModelRouter::from_config(config, CancellationToken::new())
+        .map(Arc::new)
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+fn cmd_llm_routes(router: &ModelRouter, config: &Config, json: bool) -> Result<ExitCode> {
+    let rows: Vec<serde_json::Value> = router
+        .routes()
+        .into_iter()
+        .map(|(role, lane, model)| {
+            serde_json::json!({
+                "role": role.as_str(),
+                "lane": lane,
+                "model": model,
+            })
+        })
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "provider": config.llm.provider,
+                "routes": rows,
+            })
+        );
+    } else {
+        println!("provider={}", config.llm.provider);
+        println!("role\tlane\tmodel");
+        for row in &rows {
+            let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let lane = row.get("lane").and_then(|v| v.as_str()).unwrap_or("");
+            let model = row.get("model").and_then(|v| v.as_str()).unwrap_or("-");
+            let model = if model.is_empty() { "-" } else { model };
+            println!("{role}\t{lane}\t{model}");
         }
-        other => bail!("unsupported llm.provider: {other}"),
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_llm_lanes(config: &Config, json: bool) -> Result<ExitCode> {

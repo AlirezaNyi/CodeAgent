@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use raya_agent::Orchestrator;
 use raya_core::{AgentTask, Config, ProjectId, TaskId, TaskPhase};
-use raya_llm::LlmProvider;
+use raya_llm::ModelRouter;
 use raya_store::Store;
 use raya_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use tracing::info;
 pub struct AppState {
     pub store: Arc<Store>,
     pub tools: Arc<ToolRegistry>,
-    pub llm: Arc<dyn LlmProvider>,
+    pub router: Arc<ModelRouter>,
     pub config: Config,
     pub project_root: PathBuf,
     pub started: Instant,
@@ -174,7 +174,7 @@ async fn create_task(
 
     let store = state.store.clone();
     let tools = state.tools.clone();
-    let llm = state.llm.clone();
+    let router = state.router.clone();
     let config = state.config.clone();
     let root = state.project_root.clone();
     let slots = state.task_slots.clone();
@@ -183,7 +183,7 @@ async fn create_task(
         let Ok(_permit) = slots.acquire().await else {
             return;
         };
-        let orch = Orchestrator::new(store, tools, llm, config, root);
+        let orch = Orchestrator::with_router(store, tools, router, config, root);
         let _ = orch.run(id, cancel).await;
     });
 
@@ -325,7 +325,7 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raya_llm::MockProvider;
+    use raya_llm::ModelRouter;
     use raya_policy::PolicyEngine;
     use raya_tools::default_registry;
     use tempfile::tempdir;
@@ -341,7 +341,7 @@ mod tests {
         AppState {
             store,
             tools: Arc::new(default_registry(PolicyEngine::from_defaults())),
-            llm: Arc::new(MockProvider::default_script()),
+            router: Arc::new(ModelRouter::from_config(&config, CancellationToken::new()).unwrap()),
             config: config.clone(),
             project_root: root,
             started: Instant::now(),

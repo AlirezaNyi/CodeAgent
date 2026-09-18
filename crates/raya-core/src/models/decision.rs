@@ -13,6 +13,14 @@ pub enum AgentDecision {
     Plan { plan: ExecutionPlan },
     /// Invoke a single tool.
     ToolCall { call: ToolCall },
+    /// Delegate work to a bounded subagent (Phase 3).
+    Delegate {
+        /// `planner` | `coder` | `reviewer` | `debugger`
+        role: String,
+        objective: String,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
     /// Task is finished successfully.
     Finish { summary: String },
     /// Verification failed; request another fix iteration.
@@ -68,5 +76,37 @@ mod tests {
         let v = json!({"type":"plan","plan": plan});
         let d = AgentDecision::from_value(v).unwrap();
         assert!(matches!(d, AgentDecision::Plan { .. }));
+    }
+
+    #[test]
+    fn parses_delegate() {
+        let d = AgentDecision::from_json(
+            r#"{"type":"delegate","role":"reviewer","objective":"check diff","paths":["a.rs"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            d,
+            AgentDecision::Delegate {
+                role: "reviewer".into(),
+                objective: "check diff".into(),
+                paths: vec!["a.rs".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_delegate_without_paths() {
+        let d = AgentDecision::from_json(
+            r#"{"type":"delegate","role":"planner","objective":"scope work"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            d,
+            AgentDecision::Delegate {
+                role,
+                paths,
+                ..
+            } if role == "planner" && paths.is_empty()
+        ));
     }
 }

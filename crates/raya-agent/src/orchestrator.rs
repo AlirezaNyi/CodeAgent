@@ -11,7 +11,7 @@ use raya_core::{
     TaskPhase, ToolCall, ToolCallId, VerificationStrategy, redact_secrets, write_plan_file,
 };
 use raya_index::{find_symbols, fts_search};
-use raya_llm::LlmProvider;
+use raya_llm::{LlmProvider, ModelRole, ModelRouter};
 use raya_store::Store;
 use raya_tools::{ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::resources::{ResourceLimits, ResourceManager};
+use crate::subagent::{SubagentBrief, SubagentRole, SubagentRunner, SubagentVerdict};
 
 const SYSTEM_PROMPT: &str = include_str!("../../../prompts/system.md");
 
@@ -90,12 +91,13 @@ pub enum OrchestratorError {
 pub struct Orchestrator {
     store: Arc<Store>,
     tools: Arc<ToolRegistry>,
-    llm: Arc<dyn LlmProvider>,
+    router: Arc<ModelRouter>,
     config: Config,
     project_root: PathBuf,
 }
 
 impl Orchestrator {
+    /// Compatibility constructor: wraps a single provider for all roles.
     pub fn new(
         store: Arc<Store>,
         tools: Arc<ToolRegistry>,
@@ -103,10 +105,26 @@ impl Orchestrator {
         config: Config,
         project_root: PathBuf,
     ) -> Self {
+        Self::with_router(
+            store,
+            tools,
+            Arc::new(ModelRouter::single(llm)),
+            config,
+            project_root,
+        )
+    }
+
+    pub fn with_router(
+        store: Arc<Store>,
+        tools: Arc<ToolRegistry>,
+        router: Arc<ModelRouter>,
+        config: Config,
+        project_root: PathBuf,
+    ) -> Self {
         Self {
             store,
             tools,
-            llm,
+            router,
             config,
             project_root,
         }
@@ -186,6 +204,7 @@ impl Orchestrator {
         ];
 
         let mut pending_approval: Option<ToolCall> = None;
+        let mut review_rounds: u32 = 0;
 
         loop {
             if self.should_stop(&task, &cancel, deadline)? {
@@ -234,13 +253,20 @@ impl Orchestrator {
             self.store.append_event(&Event::new(
                 task_id,
                 EventKind::LlmRequest,
-                json!({"iteration": iter, "messages": messages.len()}),
+                json!({
+                    "iteration": iter,
+                    "messages": messages.len(),
+                    "role": ModelRole::Coding.as_str(),
+                    "lane": self.router.lane_for(ModelRole::Coding),
+                    "model": self.router.model_for(ModelRole::Coding),
+                }),
             ))?;
 
             let response = self
-                .llm
+                .router
+                .provider_for(ModelRole::Coding)
                 .complete(CompletionRequest {
-                    model: self.config.llm.model.clone(),
+                    model: self.router.model_for(ModelRole::Coding),
                     messages: messages.clone(),
                     tools: Some(self.tools.schemas()),
                     structured_json: true,
@@ -340,7 +366,6 @@ impl Orchestrator {
                                 }),
                             ))?;
                             task = self.transition(task, TaskPhase::WaitingApproval)?;
-                            // Return so CLI/HTTP can surface approval; caller may resume later.
                             let _ = pending_approval;
                             return Ok(task);
                         }
@@ -352,15 +377,129 @@ impl Orchestrator {
                         }
                     }
                 }
+                AgentDecision::Delegate {
+                    role,
+                    objective,
+                    paths,
+                } => {
+                    resources
+                        .bump_tool_call()
+                        .map_err(OrchestratorError::Resource)?;
+                    task.tool_calls = resources.tool_calls();
+                    self.store.update_task(&task)?;
+
+                    let Some(sub_role) = SubagentRole::parse(&role) else {
+                        messages.push(Message::user(format!(
+                            "Unknown subagent role `{role}`. Use planner|coder|reviewer|debugger."
+                        )));
+                        continue;
+                    };
+
+                    let outcome = self
+                        .run_subagent(
+                            &task,
+                            SubagentBrief::new(sub_role, objective).with_paths(paths),
+                            &resources,
+                            &cancel,
+                        )
+                        .await;
+                    task.tokens_used = resources.tokens_used();
+                    self.store.update_task(&task)?;
+
+                    if let SubagentVerdict::Plan(plan) = &outcome.verdict {
+                        task.plan = Some(plan.clone());
+                        self.store.update_task(&task)?;
+                        if let Err(e) = write_plan_file(&self.project_root, plan) {
+                            warn!(error = %e, "failed to write .raya/PLAN.md");
+                        }
+                        self.store.append_event(&Event::new(
+                            task_id,
+                            EventKind::PlanCreated,
+                            json!({
+                                "plan": plan,
+                                "plan_md": ".raya/PLAN.md",
+                                "via": "subagent",
+                                "role": sub_role.as_str(),
+                            }),
+                        ))?;
+                    }
+
+                    messages.push(Message::user(format!(
+                        "Subagent {} result (ok={}): {}\nContinue with tool_call, delegate, or finish.",
+                        sub_role.as_str(),
+                        outcome.ok,
+                        outcome.summary
+                    )));
+                }
                 AgentDecision::Finish { summary } => {
                     task = self.transition(task, TaskPhase::Verifying)?;
-                    let verify_ok = self.verify(&task, &cancel).await?;
+                    let (verify_ok, verify_detail) = self.verify(&task, &cancel).await?;
                     if verify_ok {
-                        info!(%summary, "task completed");
-                        task.current_step = Some(summary);
+                        let mut final_summary = summary.clone();
+                        if self.config.subagent.review_on_finish {
+                            let review = self
+                                .run_subagent(
+                                    &task,
+                                    SubagentBrief::new(
+                                        SubagentRole::Reviewer,
+                                        format!("Review completed work: {summary}"),
+                                    )
+                                    .with_extra(git_diff_snippet(&self.project_root)),
+                                    &resources,
+                                    &cancel,
+                                )
+                                .await;
+                            task.tokens_used = resources.tokens_used();
+                            match review.verdict {
+                                SubagentVerdict::NeedsFix { reason }
+                                    if review_rounds < self.config.subagent.max_review_rounds =>
+                                {
+                                    review_rounds += 1;
+                                    task = self.transition(task, TaskPhase::Fixing)?;
+                                    messages.push(Message::user(format!(
+                                        "Reviewer requested fixes: {reason}. Continue with tool_call, then finish again."
+                                    )));
+                                    task = self.transition(task, TaskPhase::Executing)?;
+                                    continue;
+                                }
+                                SubagentVerdict::NeedsFix { reason } => {
+                                    warn!(
+                                        %reason,
+                                        review_rounds,
+                                        "reviewer rejected after max rounds; completing anyway"
+                                    );
+                                    final_summary =
+                                        format!("{summary} (reviewer warning: {reason})");
+                                }
+                                _ => {}
+                            }
+                        }
+                        info!(summary = %final_summary, "task completed");
+                        task.current_step = Some(final_summary);
                         self.store.update_task(&task)?;
                         return self.transition(task, TaskPhase::Completed);
                     }
+
+                    if self.config.subagent.debug_on_verify_fail {
+                        let debug = self
+                            .run_subagent(
+                                &task,
+                                SubagentBrief::new(
+                                    SubagentRole::Debugger,
+                                    "Diagnose verification failure".to_string(),
+                                )
+                                .with_extra(verify_detail.clone()),
+                                &resources,
+                                &cancel,
+                            )
+                            .await;
+                        task.tokens_used = resources.tokens_used();
+                        messages.push(Message::user(format!(
+                            "Debugger report (ok={}): {}\nVerification output:\n{}",
+                            debug.ok, debug.summary, verify_detail
+                        )));
+                    }
+
                     task = self.transition(task, TaskPhase::Fixing)?;
                     messages.push(Message::user(
                         "Verification failed. Diagnose and fix with tool_call, then finish again."
@@ -377,6 +516,24 @@ impl Orchestrator {
                 }
             }
         }
+    }
+
+    async fn run_subagent(
+        &self,
+        task: &AgentTask,
+        brief: SubagentBrief,
+        resources: &ResourceManager,
+        cancel: &CancellationToken,
+    ) -> crate::subagent::SubagentOutcome {
+        let runner = SubagentRunner {
+            store: &self.store,
+            tools: &self.tools,
+            router: &self.router,
+            config: &self.config,
+            project_root: &self.project_root,
+            task,
+        };
+        runner.run(brief, resources, cancel).await
     }
 
     async fn exec_tool(
@@ -444,7 +601,7 @@ impl Orchestrator {
         &self,
         task: &AgentTask,
         cancel: &CancellationToken,
-    ) -> Result<bool, OrchestratorError> {
+    ) -> Result<(bool, String), OrchestratorError> {
         let strategy = task
             .plan
             .as_ref()
@@ -452,7 +609,7 @@ impl Orchestrator {
             .unwrap_or(VerificationStrategy::None);
 
         let command = match strategy {
-            VerificationStrategy::None => return Ok(true),
+            VerificationStrategy::None => return Ok((true, String::new())),
             VerificationStrategy::Test => "test.run",
             VerificationStrategy::Build => "build.run",
             VerificationStrategy::TestAndBuild => "test.run",
@@ -471,34 +628,35 @@ impl Orchestrator {
             _ => json!({}),
         };
 
-        // Verification tools: for shell, policy may require approval — use test/build which are auto.
         let result = match self.tools.execute_named(&ctx, command, input).await {
             Ok(r) => r,
             Err(ToolError::Denied(reason)) | Err(ToolError::ApprovalRequired(reason)) => {
                 warn!(%reason, "verification skipped due to policy");
-                return Ok(true);
+                return Ok((true, format!("skipped: {reason}")));
             }
             Err(e) => {
+                let detail = e.to_string();
                 self.store.append_event(&Event::new(
                     task.id,
                     EventKind::TestFailed,
-                    json!({"error": e.to_string()}),
+                    json!({"error": detail.clone()}),
                 ))?;
-                return Ok(false);
+                return Ok((false, detail));
             }
         };
 
         if result.success {
             self.store
                 .append_event(&Event::new(task.id, EventKind::TestPassed, json!({})))?;
-            Ok(true)
+            Ok((true, result.output))
         } else {
+            let detail = redact_secrets(&result.output);
             self.store.append_event(&Event::new(
                 task.id,
                 EventKind::TestFailed,
-                json!({"output": redact_secrets(&result.output)}),
+                json!({"output": detail.clone()}),
             ))?;
-            Ok(false)
+            Ok((false, detail))
         }
     }
 
@@ -523,7 +681,6 @@ impl Orchestrator {
 
     async fn finish_cancelled(&self, mut task: AgentTask) -> Result<AgentTask, OrchestratorError> {
         if !task.phase.is_terminal() {
-            // Force cancel transition via update if needed
             if task.phase.can_transition_to(TaskPhase::Cancelled) {
                 task = self.transition(task, TaskPhase::Cancelled)?;
             } else {
@@ -553,5 +710,23 @@ impl Orchestrator {
             ))?;
         }
         Ok(task)
+    }
+}
+
+fn git_diff_snippet(root: &std::path::Path) -> String {
+    match std::process::Command::new("git")
+        .args(["diff", "--stat", "HEAD"])
+        .current_dir(root)
+        .output()
+    {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.trim().is_empty() {
+                "(no git diff)".into()
+            } else {
+                text.chars().take(4000).collect()
+            }
+        }
+        Err(_) => "(git diff unavailable)".into(),
     }
 }
