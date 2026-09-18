@@ -1,0 +1,34 @@
+[package]
+name = "raya-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent orchestrator loop for RAYA Agent"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+raya-context = { workspace = true }
+raya-core = { workspace = true }
+raya-llm = { workspace = true }
+raya-policy = { workspace = true }
+raya-store = { workspace = true }
+raya-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+raya-policy = { workspace = true }
+raya-tools = { workspace = true }
+raya-llm = { workspace = true }
+raya-store = { workspace = true }
+tokio-util = { workspace = true }
+
+[lints]
+workspace = true
