@@ -13,7 +13,6 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
-ignore = { workspace = true }
 raya-agent = { workspace = true }
 raya-context = { workspace = true }
 raya-core = { workspace = true }
@@ -22,6 +21,7 @@ raya-policy = { workspace = true }
 raya-protocol = { workspace = true }
 raya-store = { workspace = true }
 raya-tools = { workspace = true }
+raya-index = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
