@@ -1,0 +1,21 @@
+[package]
+name = "raya-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for RAYA Agent"
+
+[[bin]]
+name = "raya"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+raya-core = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,50 @@
+# RAYA Agent project configuration (example)
+# Copy to `.raya/config.toml` and adjust.
+
+[project]
+language = "auto"
+
+[agent]
+max_iterations = 12
+max_tool_calls = 40
+timeout_seconds = 1800
+
+[context]
+max_tokens = 40000
+max_files = 50
+
+[subagent]
+max_parallel = 3
+
+[policy]
+shell = "approval"
+git_commit = "approval"
+network = "approval"
+destructive = "deny"
+credentials = "deny"
+write = "auto"
+read = "auto"
+build_test = "auto"
+
+[git]
+auto_commit = false
+
+[resources]
+max_memory_mb = 700
+max_parallel_tools = 4
+max_parallel_agents = 3
+max_processes = 8
+
+[llm]
+# "mock" for offline tests; "openai" for OpenAI-compatible APIs
+provider = "mock"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+timeout_seconds = 120
+
+[server]
+host = "127.0.0.1"
+port = 7319
+bind_loopback = true
+allow_remote = false
+log_format = "pretty"

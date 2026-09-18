@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/raya-core",
+    "crates/raya-cli",
+]
+default-members = ["crates/raya-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["RAYA Agent Contributors"]
+repository = "https://github.com/AlirezaNyi/CodeAgent"
+
+[workspace.dependencies]
+raya-core = { path = "crates/raya-core" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.16", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
