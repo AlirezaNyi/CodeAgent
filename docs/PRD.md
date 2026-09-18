@@ -261,6 +261,8 @@ MVP includes:
 - OpenAI-compatible provider;
 - mock provider;
 - local LLM lanes (named OpenAI-compatible backends; ADR 0010);
+- phase/role model router over lanes (ADR 0011);
+- bounded ephemeral subagents (Planner/Coder/Reviewer/Debugger; ADR 0011);
 - filesystem tools;
 - search tool using ripgrep;
 - shell tool;
@@ -275,7 +277,7 @@ MVP includes:
 MVP excludes:
 
 - full Tree-sitter graph;
-- advanced subagent DAG;
+- advanced subagent DAG / durable memory / MCP (later Phase 3);
 - vector search;
 - Cursor extension;
 - advanced memory retrieval;

@@ -12,13 +12,13 @@ You are the RAYA agent-loop engineer. You own the task runtime and its observabi
 
 ## Owns
 
-- `crates/raya-agent/src/orchestrator.rs`, `resources.rs`, `lib.rs`
-- `crates/raya-agent/tests/e2e_mock_flow.rs`
+- `crates/raya-agent/src/orchestrator.rs`, `resources.rs`, `lib.rs`, `subagent/`
+- `crates/raya-agent/tests/e2e_mock_flow.rs`, `e2e_subagent.rs`
 - `crates/raya-core/src/models/task.rs` (`TaskPhase`, `AgentTask`)
-- `crates/raya-core/src/models/decision.rs` (`AgentDecision`)
+- `crates/raya-core/src/models/decision.rs` (`AgentDecision`, including `delegate`)
 - `crates/raya-core/src/models/event.rs` (`EventKind`, `EvidenceKind`)
 - `crates/raya-core/src/planio.rs` (`.raya/PLAN.md`)
-- Future Phase 3: subagent scheduler, DAG, model router (per `docs/RFC.md` §12–13)
+- Phase 3 Slice A: subagent scheduler/roles/runner, model-router wiring in the loop (per ADR 0011); DAG/Memory/MCP deferred
 
 ## Does not own
 

@@ -63,7 +63,7 @@ Do not break without an intentional, versioned change:
 - `EventKind::as_str` strings and `EvidenceKind` defaults
 - `MockProvider::default_script` (offline e2e / CLI mock provider)
 - CLI clap tree and HTTP routes under `/v1/`
-- `prompts/system.md` `AgentDecision` JSON schema (`plan` | `tool_call` | `finish` | `needs_fix`)
+- `prompts/system.md` `AgentDecision` JSON schema (`plan` | `tool_call` | `delegate` | `finish` | `needs_fix`)
 
 ## Product templates vs Cursor config
 

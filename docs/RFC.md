@@ -351,6 +351,8 @@ Each subagent gets:
 
 Do not duplicate the complete parent context.
 
+**Slice A (ADR 0011):** implemented in-process under `raya-agent::subagent` with role allowlists, `ModelRouter` over named lanes, deterministic `review_on_finish` / `debug_on_verify_fail` (default off), and LLM `AgentDecision::Delegate`. Full DAG / Memory / MCP remain later Phase 3 slices.
+
 ## 13. Execution DAG
 
 For complex tasks:
@@ -405,6 +407,7 @@ review    → medium
 summary   → cheap
 ```
 
+**Slice A:** `[models]` maps these roles to `[[llm.lanes]]` names via `raya-llm::ModelRouter` (ADR 0011). Empty values use the active lane.
 ## 15. Memory
 
 SQLite-backed memory categories:
@@ -537,6 +540,12 @@ max_files = 50
 
 [subagent]
 max_parallel = 3
+
+[models]
+planning = "cheap"
+coding = "strong"
+review = "medium"
+summary = "cheap"
 
 [policy]
 shell = "approval"

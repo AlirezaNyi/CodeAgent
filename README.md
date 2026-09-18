@@ -6,7 +6,7 @@ Cursor remains the editor UI. RAYA owns orchestration, bounded context, tools, p
 
 ## Status
 
-Phase 1 (MVP vertical slice) is implemented:
+Phases 1–2 are implemented. Phase 3 Slice A (ADR 0011) adds a role-based model router and bounded ephemeral subagents (optional review/debug triggers + `delegate`).
 
 `raya agent run` → SQLite task → plan → context → mock/OpenAI LLM → tools → verify → events.
 
@@ -49,13 +49,16 @@ Copy [`.raya/config.toml.example`](.raya/config.toml.example) to `.raya/config.t
 
 ```bash
 cargo run -p raya-cli -- agent llm lanes
+cargo run -p raya-cli -- agent llm routes
 cargo run -p raya-cli -- agent llm probe
 cargo run -p raya-cli -- agent llm probe --lane lmstudio
 ```
 
+Optional `[models]` maps planning/coding/review/debug/summary to lane names. Optional `[subagent] review_on_finish` / `debug_on_verify_fail` spawn Reviewer/Debugger workers (default off).
+
 Loopback hosts (`127.0.0.1`, `localhost`, `::1`) do **not** require an API key (and do not forward ambient `OPENAI_API_KEY`). For non-loopback OpenAI-compatible endpoints, set `RAYA_LLM_API_KEY` (or `OPENAI_API_KEY`). For a loopback server that requires auth, set `api_key_env` on that lane.
 
-See [docs/adr/0010-local-llm-lanes.md](docs/adr/0010-local-llm-lanes.md).
+See [docs/adr/0010-local-llm-lanes.md](docs/adr/0010-local-llm-lanes.md) and [docs/adr/0011-phase3-subagents-and-model-router.md](docs/adr/0011-phase3-subagents-and-model-router.md).
 
 ## Workspace layout
 
@@ -66,9 +69,9 @@ crates/
   raya-executor/   # bounded process runner
   raya-policy/     # risk classification / approval
   raya-tools/      # filesystem, search, git, shell, test/build
-  raya-llm/        # mock + OpenAI-compatible providers
+  raya-llm/        # mock + OpenAI-compatible providers + model router
   raya-context/    # search → rank → token budget
-  raya-agent/      # orchestrator loop + resource manager
+  raya-agent/      # orchestrator loop + subagents + resource manager
   raya-protocol/   # localhost HTTP API
   raya-cli/        # `raya` binary
 docs/              # PRD, RFC, SRS, ADRs
