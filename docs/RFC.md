@@ -355,7 +355,9 @@ Do not duplicate the complete parent context.
 
 **Slice B (ADR 0012):** durable approval checkpoints + resume across processes; SQLite Memory (`task` / `project` / `decision` / `agent`) with bounded FTS recall.
 
-**Slice C (ADR 0013):** optional `ExecutionPlan.nodes` DAG over in-process subagents (wave scheduler, `task_dag_nodes` status). MCP remains a later Phase 3 slice.
+**Slice C (ADR 0013):** optional `ExecutionPlan.nodes` DAG over in-process subagents (wave scheduler, `task_dag_nodes` status).
+
+**Slice D (ADR 0014):** `raya-mcp` stdio MCP control plane for Cursor (`raya mcp`); tools wrap Store/Orchestrator only — no filesystem/shell MCP tools.
 
 ## 13. Execution DAG
 
@@ -382,6 +384,8 @@ Tests    Review
 The DAG is optional for simple tasks.
 
 **Slice C (ADR 0013):** plans may include additive `nodes: [{id, role, objective, paths, depends_on}]`. Empty/omitted nodes keep the sequential parent LLM loop. The orchestrator runs ready nodes in waves via existing subagents (`subagent.max_parallel`, `max_dag_nodes`). Status is persisted in `task_dag_nodes` for `raya agent dag` / `GET /v1/tasks/{id}/dag`. Failed nodes skip dependents; the parent task is not auto-failed. Crash-resume of an in-flight DAG is out of scope for this slice.
+
+**Slice D (ADR 0014):** `crates/raya-mcp` is implemented (not a stub). Stdio MCP via `rmcp` exposes control-plane tools (`raya_run`, `raya_status`, `raya_logs`, `raya_approve`, `raya_resume`, `raya_cancel`, `raya_dag`, `raya_memory_*`). CLI `raya mcp` blocks on stdin for Cursor `mcp.json`. Streamable HTTP MCP and richer Cursor extension remain Phase 4.
 
 ## 14. LLM Gateway
 

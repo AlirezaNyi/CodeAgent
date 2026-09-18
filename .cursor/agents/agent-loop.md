@@ -23,14 +23,15 @@ You are the RAYA agent-loop engineer. You own the task runtime and its observabi
 - `crates/raya-core/src/planio.rs` (`.raya/PLAN.md`)
 - Phase 3 Slice A: subagent scheduler/roles/runner, model-router wiring (ADR 0011)
 - Phase 3 Slice B: durable approval checkpoint/resume + Task/Decision memory (ADR 0012)
-- Phase 3 Slice C: optional `ExecutionPlan.nodes` wave scheduler (ADR 0013); MCP deferred
+- Phase 3 Slice C: optional `ExecutionPlan.nodes` wave scheduler (ADR 0013)
+- MCP stdio (`raya-mcp` / `raya mcp`) is owned by the **main** agent, not this specialist (ADR 0014)
 
 ## Does not own
 
 - Policy classify / safe_path / executor (`runtime-safety`) — except calling `execute_approved` after grant
 - Migration SQL / Store internals (`persistence`) — call Store APIs only (`replace_dag`, `list_dag_nodes`, …)
 - Ranking weights / FTS query shape (`context-engine`)
-- CLI clap / axum routes / LLM HTTP client (main agent)
+- CLI clap / axum routes / LLM HTTP client / MCP stdio crate (main agent)
 - Git commits
 
 ## Procedure

@@ -7,6 +7,7 @@
 - Sensitive tools may pause for `raya agent approve <task-id> <call-id>` (auto-resumes; `--deny` / `--no-resume` available). Use `raya agent resume <task-id>` to continue a waiting task.
 - Memory: `raya agent memory list|search|add|forget` (bounded FTS recall; see ADR 0012).
 - Optional DAG: `raya agent dag <task-id>` when a plan includes `nodes` (ADR 0013).
+- MCP (Cursor): `raya mcp` — stdio control plane (ADR 0014); do not expose filesystem/shell over MCP.
 - Inspect history with `raya agent logs`, `raya agent activity`, and `raya agent receipt`.
 
 ## Repository map
@@ -25,6 +26,7 @@ crates/
   raya-index/      # hashes, FTS5, heuristic symbols
   raya-agent/      # orchestrator loop + resources
   raya-protocol/   # localhost axum API (127.0.0.1:7319)
+  raya-mcp/        # MCP stdio control plane (Cursor)
   raya-cli/        # `raya` binary
 migrations/        # append-only SQL (embedded by raya-store)
 prompts/           # system.md compiled into orchestrator via include_str!
@@ -35,7 +37,7 @@ docs/              # PRD, RFC, SRS, ADRs
 ### Dependency direction
 
 ```text
-raya-cli / raya-protocol
+raya-cli / raya-mcp / raya-protocol
         ↓
     raya-agent
         ↓
@@ -88,7 +90,7 @@ The **main Cursor agent** is the Lead Orchestrator. There is no separate orchest
 | `rust-verifier` | Gates + mock smoke | Touched crates | Pass/fail + owners | After implementers | Implementers |
 | `raya-reviewer` | Readonly invariant review | Diff | Critical/Warning/Suggestion | After verifier | Verifier (preferred) |
 
-Main keeps: CLI, HTTP, LLM providers, docs/ADRs, config, **all commits**.
+Main keeps: CLI, HTTP, MCP (`raya-mcp` / `raya mcp`), LLM providers, docs/ADRs, config, **all commits**.
 
 ### When not to delegate
 
@@ -127,7 +129,7 @@ Pass JSON briefs (task, scope, files, findings, constraints). Subagents return S
 |------|----------|
 | Policy, executor bounds, `safe_path`, registry gate, redaction | `runtime-safety` |
 | Store, migrations, index tables | `persistence` |
-| Orchestrator, TaskPhase, events, approvals, memory loop I/O, Phase 3 runtime | `agent-loop` |
+| Orchestrator, TaskPhase, events, approvals, memory loop I/O, Phase 3 runtime (not MCP surface) | `agent-loop` |
 | `memory.rs` models + store memory/checkpoint APIs / migration 0003 | `persistence` (+ `agent-loop` for orchestrator use) |
 | Ranking, search, symbols, FTS | `context-engine` |
 | cargo fmt/check/test/clippy + mock smoke | `rust-verifier` |

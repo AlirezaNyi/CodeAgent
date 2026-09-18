@@ -15,3 +15,4 @@ Implement only crates with real MVP content initially. Phase 2 adds `raya-index`
 ## Consequences
 - Cleaner dependency graph for MVP.
 - `raya-index` is now a real workspace member.
+- Phase 3 later landed memory in-store (ADR 0012), in-process subagents (ADR 0011), and `raya-mcp` stdio (ADR 0014). `raya-subagent` / `raya-memory` crates remain deferred.

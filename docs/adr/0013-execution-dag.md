@@ -20,4 +20,4 @@ RFC §13 describes an execution DAG for complex tasks. Slice A delivered ephemer
 
 ## Consequences
 - Prompts may emit `plan.nodes`; operators inspect status via CLI/HTTP.
-- Follow-up: MCP (`raya-mcp`), crash-resume of DAG waves, richer project memory curation.
+- Follow-up: crash-resume of DAG waves, richer project memory curation. MCP landed in ADR 0014.

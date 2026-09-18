@@ -22,4 +22,4 @@ ADR 0011 left approval state in-process: `pending_approval` and message history 
 ## Consequences
 - Store API grows checkpoint and memory helpers; `is_approved` remains for callers that only need “granted?”.
 - Subagents still cannot pause the parent for approval (ADR 0011).
-- Follow-ups: MCP (`raya-mcp`), richer agent/project memory curation.
+- Follow-ups: richer agent/project memory curation. MCP delivered in ADR 0014.

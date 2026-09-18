@@ -217,6 +217,9 @@ Sensitive operations shall require configurable approval. Approval pauses shall 
 ### FR-015 Resource limits
 The system shall enforce configurable limits for memory, processes, tools, agents, iterations, and tokens.
 
+### FR-016 Cursor MCP control plane
+The system shall expose a stdio MCP server (`raya mcp` / `raya-mcp`) with control-plane tools for run/status/logs/approve/resume/cancel/memory/dag. Filesystem and shell tools remain inside the agent behind the policy engine (ADR 0014).
+
 ## 10. Non-Functional Requirements
 
 ### NFR-001 Performance
@@ -277,7 +280,7 @@ MVP includes:
 MVP excludes:
 
 - full Tree-sitter graph;
-- advanced subagent DAG / durable memory / MCP (later Phase 3 — DAG/memory landed in Slices B–C; MCP remains);
+- advanced subagent DAG / durable memory / MCP (Phase 3 Slices B–D landed; richer MCP / Cursor extension remain Phase 4);
 - vector search;
 - Cursor extension;
 - advanced memory retrieval;
@@ -292,10 +295,10 @@ CLI → Task → Context → LLM → Tools → Verify → Events.
 Tree-sitter, incremental index, symbols, dependencies, FTS5, Git intelligence.
 
 ### Phase 3 — Agentic Runtime
-Subagents, scheduler, model router, memory, optional execution DAG (Slices A–C / ADR 0011–0013). MCP next.
+Subagents, scheduler, model router, memory, optional execution DAG, MCP stdio (Slices A–D / ADR 0011–0014).
 
 ### Phase 4 — Developer Experience
-Cursor integration, Web UI, advanced policy UX, resource dashboard.
+Richer Cursor integration (extension, Streamable HTTP MCP), Web UI, advanced policy UX, resource dashboard.
 
 ## 13. Success Metrics
 
