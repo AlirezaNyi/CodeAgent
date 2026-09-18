@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use raya_core::{
     AgentTask, DagNode, DagNodeStatus, Event, EventKind, EvidenceKind, ExecutionPlan, MemoryKind,
     MemoryRecord, Message, ProjectId, TaskCheckpoint, TaskDagNodeRecord, TaskId, TaskPhase,
-    ToolCall, ToolCallId,
+    ToolCall, ToolCallId, redact_secrets,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
@@ -526,7 +526,8 @@ impl Store {
     /// Replace all DAG nodes for a task (status = pending).
     pub fn replace_dag(&self, task_id: TaskId, nodes: &[DagNode]) -> StoreResult<()> {
         let conn = self.lock()?;
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM task_dag_nodes WHERE task_id = ?1",
             params![task_id.to_string()],
         )?;
@@ -536,7 +537,7 @@ impl Store {
                 .map_err(|e| StoreError::Message(format!("serialize paths: {e}")))?;
             let deps = serde_json::to_string(&n.depends_on)
                 .map_err(|e| StoreError::Message(format!("serialize depends_on: {e}")))?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO task_dag_nodes
                  (task_id, node_id, role, objective, paths_json, depends_on_json, status, summary, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)",
@@ -552,6 +553,7 @@ impl Store {
                 ],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -577,6 +579,7 @@ impl Store {
         summary: Option<&str>,
     ) -> StoreResult<bool> {
         let conn = self.lock()?;
+        let summary = summary.map(redact_secrets);
         let n = conn.execute(
             "UPDATE task_dag_nodes SET status = ?1, summary = ?2, updated_at = ?3
              WHERE task_id = ?4 AND node_id = ?5",
