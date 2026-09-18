@@ -10,6 +10,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 raya-context = { workspace = true }
 raya-core = { workspace = true }
+raya-index = { workspace = true }
 raya-llm = { workspace = true }
 raya-policy = { workspace = true }
 raya-store = { workspace = true }

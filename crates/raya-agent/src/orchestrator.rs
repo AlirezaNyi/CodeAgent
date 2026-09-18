@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use raya_context::ContextEngine;
+use raya_context::{ContextEngine, RankSignals};
 use raya_core::{
     AgentDecision, AgentTask, CompletionRequest, Config, Event, EventKind, Message, TaskId,
-    TaskPhase, ToolCall, ToolCallId, VerificationStrategy, redact_secrets,
+    TaskPhase, ToolCall, ToolCallId, VerificationStrategy, redact_secrets, write_plan_file,
 };
+use raya_index::{find_symbols, fts_search};
 use raya_llm::LlmProvider;
 use raya_store::Store;
 use raya_tools::{ToolContext, ToolError, ToolRegistry};
@@ -21,6 +22,46 @@ use tracing::{info, warn};
 use crate::resources::{ResourceLimits, ResourceManager};
 
 const SYSTEM_PROMPT: &str = include_str!("../../../prompts/system.md");
+
+fn build_rank_signals(store: &Store, root: &std::path::Path, request: &str) -> RankSignals {
+    let mut signals = RankSignals::default();
+    let keywords: Vec<String> = request
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter(|w| w.len() >= 3)
+        .map(|w| w.to_ascii_lowercase())
+        .collect();
+
+    for kw in keywords.iter().take(8) {
+        if let Ok(syms) = find_symbols(store, kw, 20) {
+            for s in syms {
+                signals
+                    .symbol_paths
+                    .insert(s.path.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    if let Ok(paths) = fts_search(store, &keywords.join(" "), 30) {
+        for p in paths {
+            signals.fts_paths.insert(p);
+        }
+    }
+    // Recent git files (best-effort, sync, short timeout via std::process)
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--pretty=format:", "--name-only", "-n", "15"])
+        .current_dir(root)
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                signals.git_recent_paths.insert(line.replace('\\', "/"));
+            }
+        }
+    }
+    let _ = root;
+    signals
+}
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -108,7 +149,9 @@ impl Orchestrator {
             ContextEngine::new(task.context_token_budget, self.config.context.max_files);
         task = self.transition(task, TaskPhase::ContextBuilding)?;
 
-        let bundle = context_engine.build(&self.project_root, &task.request)?;
+        let signals = build_rank_signals(&self.store, &self.project_root, &task.request);
+        let bundle =
+            context_engine.build_with_signals(&self.project_root, &task.request, &signals)?;
         let context_text = context_engine.render_prompt(&bundle);
         self.store.append_event(&Event::new(
             task_id,
@@ -117,6 +160,15 @@ impl Orchestrator {
                 "files": bundle.snippets.iter().map(|s| s.path.display().to_string()).collect::<Vec<_>>(),
                 "tokens": bundle.total_tokens,
                 "keywords": bundle.keywords,
+                "explanations": bundle.snippets.iter().map(|s| json!({
+                    "path": s.path.display().to_string(),
+                    "notes": s.explanation.notes,
+                    "lexical_hits": s.explanation.lexical_hits,
+                    "path_match": s.explanation.path_match,
+                    "symbol_match": s.explanation.symbol_match,
+                    "git_recent": s.explanation.git_recent,
+                    "fts_match": s.explanation.fts_match,
+                })).collect::<Vec<_>>(),
             }),
         ))?;
         let _ = resources.add_tokens(bundle.total_tokens);
@@ -246,13 +298,19 @@ impl Orchestrator {
                 AgentDecision::Plan { plan } => {
                     task.plan = Some(plan.clone());
                     self.store.update_task(&task)?;
+                    if let Err(e) = write_plan_file(&self.project_root, &plan) {
+                        warn!(error = %e, "failed to write .raya/PLAN.md");
+                    }
                     self.store.append_event(&Event::new(
                         task_id,
                         EventKind::PlanCreated,
-                        json!(plan),
+                        json!({
+                            "plan": plan,
+                            "plan_md": ".raya/PLAN.md",
+                        }),
                     ))?;
                     messages.push(Message::user(
-                        "Plan recorded. Execute the next step with a tool_call or finish when done."
+                        "Plan recorded (also written to .raya/PLAN.md). Execute the next step with a tool_call or finish when done."
                             .to_string(),
                     ));
                 }
@@ -301,7 +359,7 @@ impl Orchestrator {
                         info!(%summary, "task completed");
                         task.current_step = Some(summary);
                         self.store.update_task(&task)?;
-                        return Ok(self.transition(task, TaskPhase::Completed)?);
+                        return self.transition(task, TaskPhase::Completed);
                     }
                     task = self.transition(task, TaskPhase::Fixing)?;
                     messages.push(Message::user(

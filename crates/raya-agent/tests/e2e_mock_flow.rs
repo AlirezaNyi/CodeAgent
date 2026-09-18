@@ -1,5 +1,7 @@
 //! End-to-end mock LLM flow: task → plan → context → tool → completion.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use raya_agent::Orchestrator;
