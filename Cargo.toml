@@ -11,6 +11,7 @@ members = [
     "crates/raya-context",
     "crates/raya-agent",
     "crates/raya-protocol",
+    "crates/raya-index",
 ]
 default-members = ["crates/raya-cli"]
 
@@ -31,6 +32,7 @@ raya-llm = { path = "crates/raya-llm" }
 raya-context = { path = "crates/raya-context" }
 raya-agent = { path = "crates/raya-agent" }
 raya-protocol = { path = "crates/raya-protocol" }
+raya-index = { path = "crates/raya-index" }
 
 anyhow = "1.0"
 async-trait = "0.1"

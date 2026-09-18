@@ -1,0 +1,22 @@
+[package]
+name = "raya-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Incremental repository index (hashes, FTS5, symbols) for RAYA Agent"
+
+[dependencies]
+chrono = { workspace = true }
+hex = "0.4"
+ignore = { workspace = true }
+raya-store = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
