@@ -104,6 +104,11 @@ impl Config {
                 ConfigError::Validation("subagent.max_review_rounds must be >= 1".into()).into(),
             );
         }
+        if self.subagent.max_dag_nodes == 0 {
+            return Err(
+                ConfigError::Validation("subagent.max_dag_nodes must be >= 1".into()).into(),
+            );
+        }
         if self.resources.max_parallel_tools == 0 {
             return Err(ConfigError::Validation(
                 "resources.max_parallel_tools must be >= 1".into(),
@@ -228,6 +233,8 @@ pub struct SubagentConfig {
     pub max_tool_calls: u32,
     pub timeout_seconds: u64,
     pub max_review_rounds: u32,
+    /// Cap on optional `ExecutionPlan.nodes` (Phase 3 Slice C).
+    pub max_dag_nodes: u32,
     /// When true, spawn a Reviewer subagent after successful verification.
     pub review_on_finish: bool,
     /// When true, spawn a Debugger subagent after failed verification.
@@ -242,6 +249,7 @@ impl Default for SubagentConfig {
             max_tool_calls: 15,
             timeout_seconds: 300,
             max_review_rounds: 1,
+            max_dag_nodes: 8,
             review_on_finish: false,
             debug_on_verify_fail: false,
         }

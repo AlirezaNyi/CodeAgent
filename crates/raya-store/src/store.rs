@@ -5,8 +5,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use raya_core::{
-    AgentTask, Event, EventKind, EvidenceKind, ExecutionPlan, MemoryKind, MemoryRecord, Message,
-    ProjectId, TaskCheckpoint, TaskId, TaskPhase, ToolCall, ToolCallId,
+    AgentTask, DagNode, DagNodeStatus, Event, EventKind, EvidenceKind, ExecutionPlan, MemoryKind,
+    MemoryRecord, Message, ProjectId, TaskCheckpoint, TaskDagNodeRecord, TaskId, TaskPhase,
+    ToolCall, ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
@@ -19,6 +20,7 @@ use crate::error::{StoreError, StoreResult};
 const MIGRATION_0001: &str = include_str!("../../../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../../../migrations/0002_index.sql");
 const MIGRATION_0003: &str = include_str!("../../../migrations/0003_memory_checkpoints.sql");
+const MIGRATION_0004: &str = include_str!("../../../migrations/0004_task_dag.sql");
 
 /// Persisted project row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -521,6 +523,83 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Replace all DAG nodes for a task (status = pending).
+    pub fn replace_dag(&self, task_id: TaskId, nodes: &[DagNode]) -> StoreResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM task_dag_nodes WHERE task_id = ?1",
+            params![task_id.to_string()],
+        )?;
+        let now = Utc::now().to_rfc3339();
+        for n in nodes {
+            let paths = serde_json::to_string(&n.paths)
+                .map_err(|e| StoreError::Message(format!("serialize paths: {e}")))?;
+            let deps = serde_json::to_string(&n.depends_on)
+                .map_err(|e| StoreError::Message(format!("serialize depends_on: {e}")))?;
+            conn.execute(
+                "INSERT INTO task_dag_nodes
+                 (task_id, node_id, role, objective, paths_json, depends_on_json, status, summary, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)",
+                params![
+                    task_id.to_string(),
+                    n.id,
+                    n.role,
+                    n.objective,
+                    paths,
+                    deps,
+                    DagNodeStatus::Pending.as_str(),
+                    now,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_dag_nodes(&self, task_id: TaskId) -> StoreResult<Vec<TaskDagNodeRecord>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id, node_id, role, objective, paths_json, depends_on_json, status, summary, updated_at
+             FROM task_dag_nodes WHERE task_id = ?1 ORDER BY node_id",
+        )?;
+        let rows = stmt.query_map(params![task_id.to_string()], map_dag_node)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn set_dag_node_status(
+        &self,
+        task_id: TaskId,
+        node_id: &str,
+        status: DagNodeStatus,
+        summary: Option<&str>,
+    ) -> StoreResult<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE task_dag_nodes SET status = ?1, summary = ?2, updated_at = ?3
+             WHERE task_id = ?4 AND node_id = ?5",
+            params![
+                status.as_str(),
+                summary,
+                Utc::now().to_rfc3339(),
+                task_id.to_string(),
+                node_id,
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn delete_dag(&self, task_id: TaskId) -> StoreResult<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "DELETE FROM task_dag_nodes WHERE task_id = ?1",
+            params![task_id.to_string()],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn upsert_memory(&self, mem: &MemoryRecord) -> StoreResult<()> {
         let conn = self.lock()?;
         let tags = serde_json::to_string(&mem.tags)
@@ -700,7 +779,8 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
     let m1 = strip(MIGRATION_0001);
     let m2 = strip(MIGRATION_0002);
     let m3 = strip(MIGRATION_0003);
-    let migrations = Migrations::new(vec![M::up(&m1), M::up(&m2), M::up(&m3)]);
+    let m4 = strip(MIGRATION_0004);
+    let migrations = Migrations::new(vec![M::up(&m1), M::up(&m2), M::up(&m3), M::up(&m4)]);
     migrations.to_latest(conn)?;
     Ok(())
 }
@@ -884,6 +964,38 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
         content,
         tags,
         created_at: parse_dt(&created_at)?,
+        updated_at: parse_dt(&updated_at)?,
+    })
+}
+
+fn map_dag_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDagNodeRecord> {
+    let task_id: String = row.get(0)?;
+    let node_id: String = row.get(1)?;
+    let role: String = row.get(2)?;
+    let objective: String = row.get(3)?;
+    let paths_json: String = row.get(4)?;
+    let depends_on_json: String = row.get(5)?;
+    let status: String = row.get(6)?;
+    let summary: Option<String> = row.get(7)?;
+    let updated_at: String = row.get(8)?;
+    let paths: Vec<String> = serde_json::from_str(&paths_json).unwrap_or_default();
+    let depends_on: Vec<String> = serde_json::from_str(&depends_on_json).unwrap_or_default();
+    let status = DagNodeStatus::parse(&status).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(format!("bad dag status {status}"))),
+        )
+    })?;
+    Ok(TaskDagNodeRecord {
+        task_id: TaskId::from_uuid(parse_uuid(&task_id, 0)?),
+        node_id,
+        role,
+        objective,
+        paths,
+        depends_on,
+        status,
+        summary,
         updated_at: parse_dt(&updated_at)?,
     })
 }
@@ -1110,5 +1222,61 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn dag_replace_list_status_delete() {
+        use raya_core::DagNode;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dag.db");
+        let task_id;
+        {
+            let store = Store::open(&path).unwrap();
+            let project = store.create_project(dir.path(), "proj").unwrap();
+            let task = sample_task(project.id);
+            task_id = task.id;
+            store.create_task(&task).unwrap();
+            let nodes = vec![
+                DagNode {
+                    id: "a".into(),
+                    role: "coder".into(),
+                    objective: "write A".into(),
+                    paths: vec!["a.txt".into()],
+                    depends_on: vec![],
+                },
+                DagNode {
+                    id: "b".into(),
+                    role: "coder".into(),
+                    objective: "write B".into(),
+                    paths: vec![],
+                    depends_on: vec!["a".into()],
+                },
+            ];
+            store.replace_dag(task.id, &nodes).unwrap();
+            let listed = store.list_dag_nodes(task.id).unwrap();
+            assert_eq!(listed.len(), 2);
+            assert_eq!(listed[0].status, DagNodeStatus::Pending);
+            assert!(
+                store
+                    .set_dag_node_status(task.id, "a", DagNodeStatus::Running, None)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .set_dag_node_status(task.id, "a", DagNodeStatus::Completed, Some("done A"))
+                    .unwrap()
+            );
+            let listed = store.list_dag_nodes(task.id).unwrap();
+            let a = listed.iter().find(|n| n.node_id == "a").unwrap();
+            assert_eq!(a.status, DagNodeStatus::Completed);
+            assert_eq!(a.summary.as_deref(), Some("done A"));
+            assert_eq!(a.depends_on, Vec::<String>::new());
+            let b = listed.iter().find(|n| n.node_id == "b").unwrap();
+            assert_eq!(b.depends_on, vec!["a".to_string()]);
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.list_dag_nodes(task_id).unwrap().len(), 2);
+        assert!(store.delete_dag(task_id).unwrap());
+        assert!(store.list_dag_nodes(task_id).unwrap().is_empty());
     }
 }

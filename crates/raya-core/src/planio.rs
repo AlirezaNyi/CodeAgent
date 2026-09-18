@@ -88,6 +88,7 @@ pub fn plan_from_markdown(text: &str) -> ExecutionPlan {
         steps,
         verification,
         summary,
+        nodes: Vec::new(),
     }
 }
 

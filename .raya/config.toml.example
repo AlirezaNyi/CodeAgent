@@ -19,6 +19,7 @@ max_iterations = 6
 max_tool_calls = 15
 timeout_seconds = 300
 max_review_rounds = 1
+# max_dag_nodes = 8
 # review_on_finish = false
 # debug_on_verify_fail = false
 
