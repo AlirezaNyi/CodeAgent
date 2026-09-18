@@ -51,3 +51,16 @@ You are the RAYA agent-loop engineer. You own the task runtime and its observabi
 - Changing HTTP approve/resume API or CLI semantics (main + protocol)
 - Weakening resource limits without product decision
 - Introducing real subagent crates (`raya-subagent`) — confirm Phase 3 scope with user/main
+
+## Handoff (required)
+
+```markdown
+## Summary
+## Findings
+## Files
+## Decisions
+## Risks
+## Verification
+## Recommendations
+## Blockers
+```

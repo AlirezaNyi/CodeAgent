@@ -71,7 +71,55 @@ Do not break without an intentional, versioned change:
 
 Generated / local-only (never commit): `.raya/raya.db`, `.raya/config.toml`, `.raya/PLAN.md`, `target/`.
 
-## Delegation
+## Orchestration (main agent)
+
+The **main Cursor agent** is the Lead Orchestrator. There is no separate orchestrator subagent. Follow skill `agent-orchestration` for non-trivial work.
+
+### Capability matrix
+
+| Agent | Responsibility | Inputs | Outputs | Parallel edits | Depends on |
+|-------|----------------|--------|---------|----------------|------------|
+| `runtime-safety` | Policy, executor, `safe_path`, registry, redact | Tool name, risk intent, file paths | Code + tests; handoff | Yes with context / persistence if files disjoint | — |
+| `persistence` | Store, migrations, index tables | Schema intent | Migration path + Store API delta | Yes with safety; serialize with context on index schema | — |
+| `agent-loop` | Orchestrator, TaskPhase, events, approvals, planio | Store API / tool contracts | Loop code + e2e | Yes if files disjoint | Store API when schema changes |
+| `context-engine` | Rank, search, symbols, FTS quality | RankSignals contract, schema version | Ranking/index quality code | Yes with safety; after persistence for schema | Persistence for table shape |
+| `rust-verifier` | Gates + mock smoke | Touched crates | Pass/fail + owners | After implementers | Implementers |
+| `raya-reviewer` | Readonly invariant review | Diff | Critical/Warning/Suggestion | After verifier | Verifier (preferred) |
+
+Main keeps: CLI, HTTP, LLM providers, docs/ADRs, config, **all commits**.
+
+### When not to delegate
+
+Typos, renames, single import, formatting, tiny one-file docs — main agent only.
+
+### Default pipeline
+
+```text
+Discover (once) → specialists (parallel if disjoint) → rust-verifier
+  → (fail → owner ≤2 retries) → raya-reviewer → main docs/ADR → commit
+```
+
+### Risk
+
+- **LOW** — docs / isolated tweak → optional review
+- **MEDIUM** — multi-crate / API → verifier + reviewer
+- **HIGH** — policy defaults, migrations, TaskPhase/events contracts, path/executor → verifier + reviewer + human before destructive actions
+
+### Skills
+
+| Skill | When |
+|-------|------|
+| `agent-orchestration` | Any non-trivial multi-agent task |
+| `feature-development` | Cross-crate features |
+| `bug-fix` | Failures / wrong behavior |
+| `schema-change` | Migrations / store / index tables |
+| `add-raya-tool` | New or renamed tool |
+
+### Handoffs
+
+Pass JSON briefs (task, scope, files, findings, constraints). Subagents return Summary / Findings / Files / Decisions / Risks / Verification / Recommendations / Blockers.
+
+## Delegation quick map
 
 | Area | Subagent |
 |------|----------|
@@ -81,10 +129,6 @@ Generated / local-only (never commit): `.raya/raya.db`, `.raya/config.toml`, `.r
 | Ranking, search, symbols, FTS | `context-engine` |
 | cargo fmt/check/test/clippy + mock smoke | `rust-verifier` |
 | Diff review against project invariants | `raya-reviewer` |
-
-Main agent keeps: CLI, HTTP protocol, LLM providers, docs/ADRs, config, cross-crate orchestration, **all git commits**.
-
-Feature flow: Main plans → specialist(s) → `rust-verifier` → `raya-reviewer` → Main docs/ADR if needed → Main commits (BEM).
 
 ## Commits
 

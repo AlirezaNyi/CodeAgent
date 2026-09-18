@@ -8,7 +8,7 @@ description: >-
 
 # Add a RAYA tool
 
-Follow this checklist in order. Prefer `runtime-safety` for policy/path work and main agent for CLI/docs commits.
+Follow this checklist in order. Prefer `runtime-safety` for policy/path work and main agent for CLI/docs commits. Orchestrate via `agent-orchestration` / `feature-development` when the tool also needs loop or prompt contract changes.
 
 ## Steps
 

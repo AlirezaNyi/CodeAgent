@@ -49,3 +49,16 @@ You are the RAYA context-engine engineer. You own bounded, explainable repositor
 - Need to add `raya-index` as a Cargo dependency of `raya-context`
 - Changing `HeuristicCounter` globally (affects all budgets)
 - Schema-altering index changes (hand SQL to `persistence`)
+
+## Handoff (required)
+
+```markdown
+## Summary
+## Findings
+## Files
+## Decisions
+## Risks
+## Verification
+## Recommendations
+## Blockers
+```

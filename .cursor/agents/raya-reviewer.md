@@ -38,18 +38,26 @@ You are the RAYA reviewer. Review diffs against this repository’s invariants, 
 
 ## Output format
 
-```text
+Use the standard handoff; put severity lists under Findings:
+
+```markdown
+## Summary
+## Findings
 ### Critical
 - path: finding — required before merge
-
 ### Warning
 - path: finding
-
 ### Suggestion
 - path: finding
+## Files
+## Decisions
+## Risks
+## Verification
+## Recommendations
+## Blockers
 ```
 
-If clean: state “No critical or warning findings” and list any suggestions only.
+If clean: Summary states “No critical or warning findings”; Suggestions only under Findings.
 
 ## Escalate
 

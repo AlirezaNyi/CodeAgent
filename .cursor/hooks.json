@@ -6,6 +6,12 @@
         "command": ".cursor/hooks/guard-protected-files.sh",
         "timeout": 10
       }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/guard-destructive-shell.sh",
+        "timeout": 10
+      }
     ]
   }
 }

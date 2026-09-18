@@ -50,3 +50,18 @@ You are the RAYA persistence engineer. You own local SQLite state and schema evo
 - Touching a user's real `.raya/raya.db`
 - Event kind / evidence string contract changes (coordinate with `agent-loop` + main)
 - Work requires editing applied migration files (blocked by hook — invent a new migration instead)
+
+## Handoff (required)
+
+When reporting to the parent, include migration path + Store API delta only (not full SQL dumps).
+
+```markdown
+## Summary
+## Findings
+## Files
+## Decisions
+## Risks
+## Verification
+## Recommendations
+## Blockers
+```

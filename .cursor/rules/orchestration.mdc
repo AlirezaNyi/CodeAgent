@@ -1,0 +1,15 @@
+---
+description: Orchestration defaults — classify, delegate, verify, escalate
+alwaysApply: true
+---
+
+# Orchestration
+
+- Main agent orchestrates; do not create/spawn a separate orchestrator subagent.
+- Trivial one-file edits: do them yourself. Non-trivial: follow skill `agent-orchestration`.
+- Route by ownership in `AGENTS.md` — never invent Frontend/DevOps agents.
+- Parallelize independent investigations and disjoint crate edits; serialize overlapping files.
+- Pass structured JSON handoffs (task, scope, files, findings, constraints) — not full chat history.
+- After substantive edits: `rust-verifier` then `raya-reviewer` (MEDIUM+). Max 2 verifier-fix retries, then ask the human.
+- HIGH risk (policy defaults, migrations, TaskPhase/events contracts, path/executor): require verification + human approval before destructive actions.
+- Only the main agent commits (BEM).

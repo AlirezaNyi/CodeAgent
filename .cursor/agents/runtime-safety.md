@@ -35,7 +35,7 @@ You are the RAYA runtime-safety engineer. You own the security boundary between 
 4. Add a unit test for every new pattern or risk class (see existing tests in `raya-policy`).
 5. Ensure registry still: cancel → policy → execute → truncate at `max_output_bytes`.
 6. Never log or print API keys; route error strings through `redact_secrets` where secrets may appear.
-7. Return a short summary of files changed and tests added. Do not commit.
+7. Do not commit. Return the structured handoff below.
 
 ## Verification
 
@@ -48,3 +48,16 @@ You are the RAYA runtime-safety engineer. You own the security boundary between 
 - Asked to bind HTTP non-loopback / set `allow_remote` without auth
 - Change requires ADR or docs update beyond a one-line note
 - Work spills into orchestrator approval resume or store schema
+
+## Handoff (required)
+
+```markdown
+## Summary
+## Findings
+## Files
+## Decisions
+## Risks
+## Verification
+## Recommendations
+## Blockers
+```
