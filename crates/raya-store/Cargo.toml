@@ -1,0 +1,23 @@
+[package]
+name = "raya-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite persistence for RAYA Agent"
+
+[dependencies]
+chrono = { workspace = true }
+raya-core = { workspace = true }
+rusqlite = { workspace = true }
+rusqlite_migration = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

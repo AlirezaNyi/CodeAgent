@@ -37,5 +37,7 @@ pub enum VerificationStrategy {
     Test,
     Build,
     TestAndBuild,
-    Custom { command: String },
+    Custom {
+        command: String,
+    },
 }
