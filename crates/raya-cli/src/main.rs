@@ -10,9 +10,10 @@ use clap::{Parser, Subcommand};
 use raya_agent::Orchestrator;
 use raya_core::{
     AgentTask, Config, LogFormat, MemoryKind, MemoryRecord, TaskId, TaskPhase, ToolCallId,
-    discover, init_tracing,
+    discover, init_tracing, init_tracing_stderr,
 };
 use raya_llm::{ModelRole, ModelRouter, OpenAiCompatibleProvider};
+use raya_mcp::{RayaMcpContext, serve_stdio};
 use raya_policy::PolicyEngine;
 use raya_protocol::{AppState, serve};
 use raya_store::Store;
@@ -56,6 +57,8 @@ enum Commands {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Start the MCP stdio server (for Cursor mcp.json).
+    Mcp,
 }
 
 #[derive(Debug, Subcommand)]
@@ -180,7 +183,13 @@ async fn run() -> Result<ExitCode> {
         .llm
         .apply_active_lane()
         .context("failed to resolve llm lane")?;
-    init_tracing(LogFormat::parse(&config.server.log_format));
+    let log_format = LogFormat::parse(&config.server.log_format);
+    // MCP owns stdout for JSON-RPC; never write tracing there.
+    if matches!(cli.command, Commands::Mcp) {
+        init_tracing_stderr(log_format);
+    } else {
+        init_tracing(log_format);
+    }
 
     let db_path = config.database_path(project.path());
     let store = Arc::new(Store::open(&db_path).context("open store")?);
@@ -637,6 +646,19 @@ async fn run() -> Result<ExitCode> {
                 cancel_tokens: Arc::new(tokio::sync::Mutex::new(Default::default())),
             };
             serve(state).await.map_err(|e| anyhow::anyhow!(e))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Mcp => {
+            let ctx = Arc::new(RayaMcpContext {
+                store,
+                tools,
+                router,
+                config,
+                project_root: project.path().to_path_buf(),
+                project_id: project_rec.id,
+            });
+            info!("starting MCP stdio server");
+            serve_stdio(ctx).await.context("mcp stdio server")?;
             Ok(ExitCode::SUCCESS)
         }
     }

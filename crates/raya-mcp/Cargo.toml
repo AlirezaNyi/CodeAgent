@@ -1,32 +1,30 @@
 [package]
-name = "raya-cli"
+name = "raya-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Command-line interface for RAYA Agent"
-
-[[bin]]
-name = "raya"
-path = "src/main.rs"
+description = "MCP stdio server for RAYA Agent (Cursor control plane)"
 
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true }
-clap = { workspace = true }
 raya-agent = { workspace = true }
-raya-context = { workspace = true }
 raya-core = { workspace = true }
 raya-llm = { workspace = true }
 raya-policy = { workspace = true }
-raya-protocol = { workspace = true }
 raya-store = { workspace = true }
 raya-tools = { workspace = true }
-raya-index = { workspace = true }
-raya-mcp = { workspace = true }
+rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

@@ -23,4 +23,4 @@ pub use planio::{
 pub use project::{ProjectRoot, discover};
 pub use redact::redact_secrets;
 pub use tokens::{HeuristicCounter, TokenCounter};
-pub use tracing_init::{LogFormat, init_tracing};
+pub use tracing_init::{LogFormat, init_tracing, init_tracing_stderr};

@@ -12,6 +12,7 @@ members = [
     "crates/raya-agent",
     "crates/raya-protocol",
     "crates/raya-index",
+    "crates/raya-mcp",
 ]
 default-members = ["crates/raya-cli"]
 
@@ -33,6 +34,7 @@ raya-context = { path = "crates/raya-context" }
 raya-agent = { path = "crates/raya-agent" }
 raya-protocol = { path = "crates/raya-protocol" }
 raya-index = { path = "crates/raya-index" }
+raya-mcp = { path = "crates/raya-mcp" }
 
 anyhow = "1.0"
 async-trait = "0.1"
@@ -59,6 +61,7 @@ uuid = { version = "1.16", features = ["v4", "serde"] }
 tempfile = "3.19"
 wiremock = "0.6"
 assert_cmd = "2.0"
+rmcp = "3.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

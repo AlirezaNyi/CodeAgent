@@ -22,3 +22,6 @@ target
 .env
 .env.*
 !.env.example
+
+# Local cargo home used when sandbox blocks ~/.cargo
+.cargo-home/
