@@ -10,7 +10,7 @@ mod task;
 mod tool;
 
 pub use decision::AgentDecision;
-pub use event::{Event, EventKind};
+pub use event::{Event, EventKind, EvidenceKind};
 pub use ids::{EventId, ProjectId, TaskId, ToolCallId};
 pub use llm::{CompletionRequest, CompletionResponse, Message, MessageRole, TokenUsage};
 pub use plan::{ExecutionPlan, PlanStep, VerificationStrategy};

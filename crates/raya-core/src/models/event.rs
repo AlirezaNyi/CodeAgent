@@ -6,6 +6,42 @@ use serde_json::Value;
 
 use super::ids::{EventId, TaskId};
 
+/// Provenance of an event fact (AgentTrail-inspired evidence classes).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceKind {
+    /// Declared by the agent/runtime (plan status, phase, approval request).
+    Reported,
+    /// Directly measured (file write, tool exit, test result).
+    Observed,
+    /// Heuristic association (ranking, role inference).
+    Inferred,
+    /// Missing or unclassified.
+    #[default]
+    Unknown,
+}
+
+impl EvidenceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reported => "reported",
+            Self::Observed => "observed",
+            Self::Inferred => "inferred",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "reported" => Self::Reported,
+            "observed" => Self::Observed,
+            "inferred" => Self::Inferred,
+            "unknown" => Self::Unknown,
+            _ => return None,
+        })
+    }
+}
+
 /// Kind of structured event emitted by the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +122,32 @@ impl EventKind {
             _ => return None,
         })
     }
+
+    /// Default evidence class for this event kind.
+    pub fn default_evidence(self) -> EvidenceKind {
+        match self {
+            Self::FileModified | Self::ToolCompleted | Self::TestPassed | Self::TestFailed => {
+                EvidenceKind::Observed
+            }
+            Self::ContextRetrieved => EvidenceKind::Inferred,
+            Self::TaskCreated
+            | Self::TaskStarted
+            | Self::PlanCreated
+            | Self::LlmRequest
+            | Self::LlmResponse
+            | Self::ToolStarted
+            | Self::TestStarted
+            | Self::AgentSpawned
+            | Self::AgentCompleted
+            | Self::ApprovalRequested
+            | Self::ApprovalGranted
+            | Self::ApprovalDenied
+            | Self::TaskCompleted
+            | Self::TaskFailed
+            | Self::TaskCancelled
+            | Self::PhaseChanged => EvidenceKind::Reported,
+        }
+    }
 }
 
 /// Structured, queryable runtime event.
@@ -94,6 +156,7 @@ pub struct Event {
     pub id: EventId,
     pub task_id: TaskId,
     pub kind: EventKind,
+    pub evidence: EvidenceKind,
     pub payload: Value,
     pub created_at: DateTime<Utc>,
 }
@@ -104,8 +167,38 @@ impl Event {
             id: EventId::new(),
             task_id,
             kind,
+            evidence: kind.default_evidence(),
             payload,
             created_at: Utc::now(),
         }
+    }
+
+    pub fn with_evidence(mut self, evidence: EvidenceKind) -> Self {
+        self.evidence = evidence;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Event, EventKind, EvidenceKind, TaskId};
+    use serde_json::json;
+
+    #[test]
+    fn default_evidence_by_kind() {
+        assert_eq!(
+            EventKind::FileModified.default_evidence(),
+            EvidenceKind::Observed
+        );
+        assert_eq!(
+            EventKind::ContextRetrieved.default_evidence(),
+            EvidenceKind::Inferred
+        );
+        assert_eq!(
+            EventKind::PlanCreated.default_evidence(),
+            EvidenceKind::Reported
+        );
+        let e = Event::new(TaskId::new(), EventKind::ToolCompleted, json!({}));
+        assert_eq!(e.evidence, EvidenceKind::Observed);
     }
 }
