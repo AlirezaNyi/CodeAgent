@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/guard-protected-files.sh",
+        "timeout": 10
+      }
+    ]
+  }
+}

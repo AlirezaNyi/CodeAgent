@@ -1,0 +1,24 @@
+---
+description: Safety boundary invariants for policy, executor, path confinement, redaction
+globs: crates/raya-policy/**,crates/raya-executor/**,crates/raya-tools/src/path.rs,crates/raya-tools/src/registry.rs,crates/raya-core/src/redact.rs
+alwaysApply: false
+---
+
+# Safety boundary
+
+Delegate substantive work here to the `runtime-safety` subagent.
+
+## Invariants
+
+- Every tool call: cancel check → `PolicyEngine::evaluate` → execute → output truncation.
+- `safe_path` must reject `..` and symlink escapes outside the project root.
+- Executor: timeout, stdout/stderr caps, `kill_on_drop`, cancel → `start_kill`.
+- Default policy: `destructive` / `credentials` = deny; `shell` / `network` / `git_commit` = approval.
+- Never weaken deny defaults without explicit user approval.
+- `redact_secrets` on LLM/tool error paths that may contain credentials.
+- Add a test for every new destructive/credential/network pattern or risk class.
+
+## Do not
+
+- Bypass policy for “convenience” in tests that exercise production paths.
+- Expose non-loopback HTTP binding without auth (`allow_remote`).

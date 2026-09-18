@@ -1,0 +1,24 @@
+---
+description: Append-only SQLite migration and index schema rules
+globs: migrations/**,crates/raya-store/**,crates/raya-index/**
+alwaysApply: false
+---
+
+# Migrations and index schema
+
+Delegate substantive work here to the `persistence` subagent.
+
+## Append-only procedure
+
+1. Add `migrations/000N_descriptive.sql` (never edit `0001_init.sql` or `0002_index.sql`).
+2. Add `include_str!` const in `crates/raya-store/src/store.rs`.
+3. Append `M::up(&mN)` to the `Migrations::new(vec![...])` list (order = version).
+4. Add reopen / roundtrip store or index tests.
+5. If index row shape changes, bump `index_version` in `raya-index`.
+
+## Do not
+
+- Edit already-applied migration SQL (breaks existing `.raya/raya.db`).
+- Run destructive schema ops (drop/rename) without human approval.
+- Mutate a user's real project database; use `tempfile` / `Store::open_in_memory` in tests.
+- Put PRAGMA foreign_keys in migration SQL (stripped; connection configures WAL/FK).

@@ -1,0 +1,22 @@
+---
+description: Idiomatic Rust conventions for RAYA crates
+globs: crates/**/*.rs
+alwaysApply: false
+---
+
+# Rust conventions
+
+- Idiomatic ownership; typed errors with `thiserror` in library crates.
+- `anyhow` only at the `raya-cli` application boundary.
+- No `unwrap()` / `expect()` in production paths. In crates that need tests, use:
+  `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]`
+- Prefer `async` only where needed; avoid unbounded channels and global mutable state.
+- SQLite: sync `rusqlite` behind a thin async facade (`spawn_blocking` when calling from async).
+- Propagate `CancellationToken` through tools, executor, and LLM calls.
+- Structured `tracing`; useful fields: `task_id`, `project_id`, `tool`, `event`, `duration_ms`, `result`, `error`. Redact secrets.
+
+## Tests
+
+- Unit-test policy, budgets, state transitions, path safety.
+- Use `tempfile` for filesystem fixtures; `wiremock` for OpenAI HTTP; `MockProvider` for e2e.
+- Keep changes minimal and task-scoped.

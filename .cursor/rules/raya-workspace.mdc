@@ -1,0 +1,32 @@
+---
+description: Core RAYA workspace constraints for every session
+alwaysApply: true
+---
+
+# RAYA workspace
+
+- Prefer small typed modules; lower crates must not depend on `raya-agent` or `raya-cli`.
+- `raya-context` must not depend on `raya-index` (inject `RankSignals`).
+- All tool execution goes through `PolicyEngine`; never load the whole repo into an LLM prompt.
+- Bound concurrency, iterations, tool calls, and token budgets.
+
+## Gates
+
+`cargo fmt --check` · `cargo check --workspace` · `cargo test --workspace` · `cargo clippy --workspace --all-targets --all-features`
+
+## Contracts
+
+Preserve tool names, `EventKind` strings, `MockProvider::default_script`, CLI/HTTP surfaces, and `prompts/system.md` `AgentDecision` schema unless deliberately versioned.
+
+## Templates vs Cursor
+
+`.raya/rules/*`, `.raya/config.toml.example`, and `prompts/system.md` are product templates (`include_str!` / `raya init`). Cursor guidance lives in `.cursor/` and `AGENTS.md`.
+
+## Safety
+
+- Never commit `.raya/raya.db`, `.raya/config.toml`, `.raya/PLAN.md`, or `target/`.
+- Never print `RAYA_LLM_API_KEY` / `OPENAI_API_KEY` or other secrets.
+- Verify with `llm.provider = "mock"` only; smoke-run only in a temp project dir.
+- Migrations are append-only; do not edit applied SQL files.
+- Architectural changes need an ADR under `docs/adr/`.
+- Only the main agent creates git commits (BEM). Delegate specialists per `AGENTS.md`.
