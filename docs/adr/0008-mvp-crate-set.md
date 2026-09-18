@@ -1,17 +1,17 @@
 # ADR 0008: MVP crate set (defer empty crates)
 
 ## Status
-Accepted
+Superseded in part by ADR 0009 / Phase 2
 
 ## Context
 The RFC lists crates including index, subagent, memory, and MCP that are Phase 2/3 features.
 
 ## Decision
-Implement only crates with real MVP content: `raya-core`, `raya-store`, `raya-policy`, `raya-executor`, `raya-tools`, `raya-llm`, `raya-context`, `raya-agent`, `raya-protocol`, `raya-cli`. Do not scaffold empty placeholders.
+Implement only crates with real MVP content initially. Phase 2 adds `raya-index` with real hashing/FTS/symbol code (see ADR 0009). Still defer `raya-subagent`, `raya-memory`, `raya-mcp` until Phase 3.
 
 ## Alternatives
 - Create all RFC crates empty — noise and false completeness.
 
 ## Consequences
-- Cleaner dependency graph.
-- Phase 2 adds crates when they have real code.
+- Cleaner dependency graph for MVP.
+- `raya-index` is now a real workspace member.
