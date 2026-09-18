@@ -107,6 +107,25 @@ impl ToolRegistry {
         ctx: &ToolContext,
         call: &ToolCall,
     ) -> Result<ToolResult, ToolError> {
+        self.execute_inner(ctx, call, false).await
+    }
+
+    /// Like [`Self::execute`], but treat prior human approval as allow
+    /// (still honors Deny).
+    pub async fn execute_approved(
+        &self,
+        ctx: &ToolContext,
+        call: &ToolCall,
+    ) -> Result<ToolResult, ToolError> {
+        self.execute_inner(ctx, call, true).await
+    }
+
+    async fn execute_inner(
+        &self,
+        ctx: &ToolContext,
+        call: &ToolCall,
+        already_approved: bool,
+    ) -> Result<ToolResult, ToolError> {
         if ctx.cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
@@ -119,7 +138,11 @@ impl ToolRegistry {
                 return Err(ToolError::Denied(reason));
             }
             raya_core::PolicyDecision::RequireApproval { reason } => {
-                return Err(ToolError::ApprovalRequired(reason));
+                if already_approved {
+                    info!(tool = %call.name, "tool previously approved; executing");
+                } else {
+                    return Err(ToolError::ApprovalRequired(reason));
+                }
             }
         }
 

@@ -7,8 +7,9 @@ use std::time::Duration;
 use chrono::Utc;
 use raya_context::{ContextEngine, RankSignals};
 use raya_core::{
-    AgentDecision, AgentTask, CompletionRequest, Config, Event, EventKind, Message, TaskId,
-    TaskPhase, ToolCall, ToolCallId, VerificationStrategy, redact_secrets, write_plan_file,
+    AgentDecision, AgentTask, CompletionRequest, Config, Event, EventKind, HeuristicCounter,
+    MemoryKind, MemoryRecord, Message, TaskCheckpoint, TaskId, TaskPhase, TokenCounter, ToolCall,
+    ToolCallId, VerificationStrategy, redact_secrets, write_plan_file,
 };
 use raya_index::{find_symbols, fts_search};
 use raya_llm::{LlmProvider, ModelRole, ModelRouter};
@@ -23,6 +24,7 @@ use crate::resources::{ResourceLimits, ResourceManager};
 use crate::subagent::{SubagentBrief, SubagentRole, SubagentRunner, SubagentVerdict};
 
 const SYSTEM_PROMPT: &str = include_str!("../../../prompts/system.md");
+const CHECKPOINT_MESSAGE_CAP: usize = 40;
 
 fn build_rank_signals(store: &Store, root: &std::path::Path, request: &str) -> RankSignals {
     let mut signals = RankSignals::default();
@@ -153,91 +155,141 @@ impl Orchestrator {
             Utc::now() + chrono::Duration::seconds(self.config.agent.timeout_seconds as i64)
         });
 
-        self.store
-            .append_event(&Event::new(task_id, EventKind::TaskStarted, json!({})))?;
+        let mut messages: Vec<Message>;
+        let mut pending_approval: Option<ToolCall>;
+        let mut review_rounds: u32;
+        let resuming = task.phase == TaskPhase::WaitingApproval;
 
-        // Created → Planning
-        task = self.transition(task, TaskPhase::Planning)?;
+        if resuming {
+            let cp = self.store.load_checkpoint(task_id)?.ok_or_else(|| {
+                OrchestratorError::Message(
+                    "task is waiting_approval but no checkpoint was found; cannot resume".into(),
+                )
+            })?;
+            messages = cp.messages;
+            pending_approval = cp.pending_call;
+            review_rounds = cp.review_rounds;
+            self.store.append_event(&Event::new(
+                task_id,
+                EventKind::PhaseChanged,
+                json!({"resumed": true, "phase": "waiting_approval"}),
+            ))?;
+            let _ = resources.add_tokens(task.tokens_used);
+        } else {
+            self.store
+                .append_event(&Event::new(task_id, EventKind::TaskStarted, json!({})))?;
 
-        // Planning
-        if self.should_stop(&task, &cancel, deadline)? {
-            return self.finish_cancelled(task).await;
+            task = self.transition(task, TaskPhase::Planning)?;
+
+            if self.should_stop(&task, &cancel, deadline)? {
+                return self.finish_cancelled(task).await;
+            }
+            let context_engine =
+                ContextEngine::new(task.context_token_budget, self.config.context.max_files);
+            task = self.transition(task, TaskPhase::ContextBuilding)?;
+
+            let signals = build_rank_signals(&self.store, &self.project_root, &task.request);
+            let bundle =
+                context_engine.build_with_signals(&self.project_root, &task.request, &signals)?;
+            let context_text = context_engine.render_prompt(&bundle);
+
+            let (memory_block, memory_meta) = self.recall_memories(&task);
+            let user_content = if memory_block.is_empty() {
+                format!(
+                    "Project root: {}\n\nRequest:\n{}\n\nRepository context:\n{}",
+                    self.project_root.display(),
+                    task.request,
+                    context_text
+                )
+            } else {
+                format!(
+                    "Project root: {}\n\nRequest:\n{}\n\n{memory_block}\n\nRepository context:\n{}",
+                    self.project_root.display(),
+                    task.request,
+                    context_text
+                )
+            };
+
+            self.store.append_event(&Event::new(
+                task_id,
+                EventKind::ContextRetrieved,
+                json!({
+                    "files": bundle.snippets.iter().map(|s| s.path.display().to_string()).collect::<Vec<_>>(),
+                    "tokens": bundle.total_tokens,
+                    "keywords": bundle.keywords,
+                    "explanations": bundle.snippets.iter().map(|s| json!({
+                        "path": s.path.display().to_string(),
+                        "notes": s.explanation.notes,
+                        "lexical_hits": s.explanation.lexical_hits,
+                        "path_match": s.explanation.path_match,
+                        "symbol_match": s.explanation.symbol_match,
+                        "git_recent": s.explanation.git_recent,
+                        "fts_match": s.explanation.fts_match,
+                    })).collect::<Vec<_>>(),
+                    "memories": memory_meta,
+                }),
+            ))?;
+            let _ = resources.add_tokens(bundle.total_tokens);
+
+            task = self.transition(task, TaskPhase::Executing)?;
+
+            messages = vec![Message::system(SYSTEM_PROMPT), Message::user(user_content)];
+            pending_approval = None;
+            review_rounds = 0;
         }
-        let context_engine =
-            ContextEngine::new(task.context_token_budget, self.config.context.max_files);
-        task = self.transition(task, TaskPhase::ContextBuilding)?;
-
-        let signals = build_rank_signals(&self.store, &self.project_root, &task.request);
-        let bundle =
-            context_engine.build_with_signals(&self.project_root, &task.request, &signals)?;
-        let context_text = context_engine.render_prompt(&bundle);
-        self.store.append_event(&Event::new(
-            task_id,
-            EventKind::ContextRetrieved,
-            json!({
-                "files": bundle.snippets.iter().map(|s| s.path.display().to_string()).collect::<Vec<_>>(),
-                "tokens": bundle.total_tokens,
-                "keywords": bundle.keywords,
-                "explanations": bundle.snippets.iter().map(|s| json!({
-                    "path": s.path.display().to_string(),
-                    "notes": s.explanation.notes,
-                    "lexical_hits": s.explanation.lexical_hits,
-                    "path_match": s.explanation.path_match,
-                    "symbol_match": s.explanation.symbol_match,
-                    "git_recent": s.explanation.git_recent,
-                    "fts_match": s.explanation.fts_match,
-                })).collect::<Vec<_>>(),
-            }),
-        ))?;
-        let _ = resources.add_tokens(bundle.total_tokens);
-
-        task = self.transition(task, TaskPhase::Executing)?;
-
-        let mut messages = vec![
-            Message::system(SYSTEM_PROMPT),
-            Message::user(format!(
-                "Project root: {}\n\nRequest:\n{}\n\nRepository context:\n{}",
-                self.project_root.display(),
-                task.request,
-                context_text
-            )),
-        ];
-
-        let mut pending_approval: Option<ToolCall> = None;
-        let mut review_rounds: u32 = 0;
 
         loop {
             if self.should_stop(&task, &cancel, deadline)? {
                 return self.finish_cancelled(task).await;
             }
 
-            // Resume from approval if granted
             if task.phase == TaskPhase::WaitingApproval {
                 if let Some(call) = pending_approval.clone() {
-                    if self.store.is_approved(call.id)? {
-                        self.store.append_event(&Event::new(
-                            task_id,
-                            EventKind::ApprovalGranted,
-                            json!({"call_id": call.id.to_string()}),
-                        ))?;
-                        task = self.transition(task, TaskPhase::Executing)?;
-                        match self.exec_tool(&task, &call, &cancel, &resources).await {
-                            Ok(result_msg) => {
-                                messages.push(Message::assistant(format!(
-                                    "tool {} executed",
-                                    call.name
-                                )));
-                                messages.push(Message::user(result_msg));
-                                pending_approval = None;
-                            }
-                            Err(e) => {
-                                task.error = Some(e.to_string());
-                                return self.fail(task).await;
+                    match self.store.approval_status(call.id)? {
+                        Some(true) => {
+                            self.store.append_event(&Event::new(
+                                task_id,
+                                EventKind::ApprovalGranted,
+                                json!({"call_id": call.id.to_string()}),
+                            ))?;
+                            task = self.transition(task, TaskPhase::Executing)?;
+                            match self
+                                .exec_tool_approved(&task, &call, &cancel, &resources)
+                                .await
+                            {
+                                Ok(result_msg) => {
+                                    messages.push(Message::assistant(format!(
+                                        "tool {} executed",
+                                        call.name
+                                    )));
+                                    messages.push(Message::user(result_msg));
+                                    pending_approval = None;
+                                    let _ = self.store.delete_checkpoint(task_id);
+                                }
+                                Err(e) => {
+                                    task.error = Some(e.to_string());
+                                    return self.fail(task).await;
+                                }
                             }
                         }
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        continue;
+                        Some(false) => {
+                            self.store.append_event(&Event::new(
+                                task_id,
+                                EventKind::ApprovalDenied,
+                                json!({"call_id": call.id.to_string(), "tool": call.name}),
+                            ))?;
+                            messages.push(Message::user(format!(
+                                "Tool {} was denied by the user. Try another approach or finish.",
+                                call.name
+                            )));
+                            pending_approval = None;
+                            let _ = self.store.delete_checkpoint(task_id);
+                            task = self.transition(task, TaskPhase::Executing)?;
+                        }
+                        None => {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            continue;
+                        }
                     }
                 } else {
                     task = self.transition(task, TaskPhase::Executing)?;
@@ -335,6 +387,7 @@ impl Orchestrator {
                             "plan_md": ".raya/PLAN.md",
                         }),
                     ))?;
+                    self.record_decision_memory(&task, &plan);
                     messages.push(Message::user(
                         "Plan recorded (also written to .raya/PLAN.md). Execute the next step with a tool_call or finish when done."
                             .to_string(),
@@ -366,7 +419,12 @@ impl Orchestrator {
                                 }),
                             ))?;
                             task = self.transition(task, TaskPhase::WaitingApproval)?;
-                            let _ = pending_approval;
+                            self.persist_checkpoint(
+                                task_id,
+                                &messages,
+                                pending_approval.clone(),
+                                review_rounds,
+                            )?;
                             return Ok(task);
                         }
                         Err(e) => {
@@ -422,6 +480,7 @@ impl Orchestrator {
                                 "role": sub_role.as_str(),
                             }),
                         ))?;
+                        self.record_decision_memory(&task, plan);
                     }
 
                     messages.push(Message::user(format!(
@@ -475,8 +534,10 @@ impl Orchestrator {
                             }
                         }
                         info!(summary = %final_summary, "task completed");
-                        task.current_step = Some(final_summary);
+                        task.current_step = Some(final_summary.clone());
                         self.store.update_task(&task)?;
+                        self.record_task_memory(&task, &final_summary);
+                        let _ = self.store.delete_checkpoint(task_id);
                         return self.transition(task, TaskPhase::Completed);
                     }
 
@@ -518,6 +579,121 @@ impl Orchestrator {
         }
     }
 
+    fn persist_checkpoint(
+        &self,
+        task_id: TaskId,
+        messages: &[Message],
+        pending_call: Option<ToolCall>,
+        review_rounds: u32,
+    ) -> Result<(), OrchestratorError> {
+        let start = messages.len().saturating_sub(CHECKPOINT_MESSAGE_CAP);
+        let capped: Vec<Message> = messages[start..]
+            .iter()
+            .map(|m| Message {
+                role: m.role,
+                content: redact_secrets(&m.content),
+                name: m.name.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+            })
+            .collect();
+        let mut cp = TaskCheckpoint::new(task_id, capped, pending_call);
+        cp.review_rounds = review_rounds;
+        self.store.save_checkpoint(&cp)?;
+        Ok(())
+    }
+
+    fn recall_memories(&self, task: &AgentTask) -> (String, Vec<serde_json::Value>) {
+        if !self.config.memory.enabled {
+            return (String::new(), Vec::new());
+        }
+        let Ok(rows) = self.store.search_memories(
+            task.project_id,
+            &task.request,
+            self.config.memory.max_items,
+        ) else {
+            return (String::new(), Vec::new());
+        };
+        if rows.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        let counter = HeuristicCounter;
+        let mut block = String::from("## Project memory\n");
+        let mut used = counter.count(&block);
+        let mut meta = Vec::new();
+        for m in rows {
+            let entry = format!("- [{}] {}\n", m.kind.as_str(), m.content);
+            let t = counter.count(&entry);
+            if used + t > self.config.memory.max_tokens {
+                break;
+            }
+            block.push_str(&entry);
+            used += t;
+            meta.push(json!({"id": m.id, "kind": m.kind.as_str()}));
+        }
+        if meta.is_empty() {
+            (String::new(), Vec::new())
+        } else {
+            (block, meta)
+        }
+    }
+
+    fn record_task_memory(&self, task: &AgentTask, summary: &str) {
+        if !self.config.memory.enabled {
+            return;
+        }
+        let files: Vec<String> = self
+            .store
+            .list_events(task.id, None, 200)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, e)| e.kind == EventKind::FileModified)
+            .filter_map(|(_, e)| {
+                e.payload
+                    .get("input")
+                    .and_then(|v| v.get("path"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        let content = if files.is_empty() {
+            format!("Request: {}\nSummary: {summary}", task.request)
+        } else {
+            format!(
+                "Request: {}\nSummary: {summary}\nFiles: {}",
+                task.request,
+                files.join(", ")
+            )
+        };
+        let mem = MemoryRecord::new(task.project_id, MemoryKind::Task, content, Some(task.id))
+            .with_key("task_summary");
+        if let Err(e) = self.store.upsert_memory(&mem) {
+            warn!(error = %e, "failed to record task memory");
+        }
+    }
+
+    fn record_decision_memory(&self, task: &AgentTask, plan: &raya_core::ExecutionPlan) {
+        if !self.config.memory.enabled {
+            return;
+        }
+        let steps: Vec<String> = plan
+            .steps
+            .iter()
+            .map(|s| format!("{}: {}", s.id, s.description))
+            .collect();
+        let summary = plan.summary.clone().unwrap_or_default();
+        let content = format!("Plan summary: {summary}\nSteps:\n{}", steps.join("\n"));
+        let mem = MemoryRecord::new(
+            task.project_id,
+            MemoryKind::Decision,
+            content,
+            Some(task.id),
+        )
+        .with_key("plan");
+        if let Err(e) = self.store.upsert_memory(&mem) {
+            warn!(error = %e, "failed to record decision memory");
+        }
+    }
+
     async fn run_subagent(
         &self,
         task: &AgentTask,
@@ -543,6 +719,29 @@ impl Orchestrator {
         cancel: &CancellationToken,
         resources: &ResourceManager,
     ) -> Result<String, OrchestratorError> {
+        self.exec_tool_inner(task, call, cancel, resources, false)
+            .await
+    }
+
+    async fn exec_tool_approved(
+        &self,
+        task: &AgentTask,
+        call: &ToolCall,
+        cancel: &CancellationToken,
+        resources: &ResourceManager,
+    ) -> Result<String, OrchestratorError> {
+        self.exec_tool_inner(task, call, cancel, resources, true)
+            .await
+    }
+
+    async fn exec_tool_inner(
+        &self,
+        task: &AgentTask,
+        call: &ToolCall,
+        cancel: &CancellationToken,
+        resources: &ResourceManager,
+        already_approved: bool,
+    ) -> Result<String, OrchestratorError> {
         let _permit = resources
             .acquire_tool()
             .await
@@ -555,7 +754,12 @@ impl Orchestrator {
         ))?;
 
         let ctx = ToolContext::new(task.id, self.project_root.clone(), cancel.clone());
-        match self.tools.execute(&ctx, call).await {
+        let result = if already_approved {
+            self.tools.execute_approved(&ctx, call).await
+        } else {
+            self.tools.execute(&ctx, call).await
+        };
+        match result {
             Ok(result) => {
                 self.store.append_event(&Event::new(
                     task.id,
@@ -680,6 +884,7 @@ impl Orchestrator {
     }
 
     async fn finish_cancelled(&self, mut task: AgentTask) -> Result<AgentTask, OrchestratorError> {
+        let _ = self.store.delete_checkpoint(task.id);
         if !task.phase.is_terminal() {
             if task.phase.can_transition_to(TaskPhase::Cancelled) {
                 task = self.transition(task, TaskPhase::Cancelled)?;
@@ -698,6 +903,7 @@ impl Orchestrator {
     }
 
     async fn fail(&self, mut task: AgentTask) -> Result<AgentTask, OrchestratorError> {
+        let _ = self.store.delete_checkpoint(task.id);
         if task.phase.can_transition_to(TaskPhase::Failed) {
             task = self.transition(task, TaskPhase::Failed)?;
         } else {

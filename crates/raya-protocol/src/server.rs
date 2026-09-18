@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use raya_agent::Orchestrator;
-use raya_core::{AgentTask, Config, ProjectId, TaskId, TaskPhase};
+use raya_core::{AgentTask, Config, MemoryKind, ProjectId, TaskId, TaskPhase, ToolCallId};
 use raya_llm::ModelRouter;
 use raya_store::Store;
 use raya_tools::ToolRegistry;
@@ -77,9 +77,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{id}", get(get_task))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
+        .route("/v1/tasks/{id}/approve", post(approve_task))
         .route("/v1/tasks/{id}/events", get(list_events))
         .route("/v1/projects", post(create_project))
         .route("/v1/projects/{id}/index", post(index_project))
+        .route("/v1/projects/{id}/memory", get(list_project_memory))
         .with_state(state)
 }
 
@@ -218,6 +220,103 @@ async fn cancel_task(
         token.cancel();
     }
     Ok(Json(serde_json::json!({"cancelled": true, "id": id})))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveRequest {
+    pub call_id: String,
+    #[serde(default = "default_granted")]
+    pub granted: bool,
+}
+
+fn default_granted() -> bool {
+    true
+}
+
+async fn approve_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ApproveRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tid: TaskId = id.parse().map_err(|_| ApiError::bad("invalid task id"))?;
+    let cid: ToolCallId = body
+        .call_id
+        .parse()
+        .map_err(|_| ApiError::bad("invalid call_id"))?;
+    let _ = state
+        .store
+        .get_task(tid)?
+        .ok_or_else(|| ApiError::not_found("task not found"))?;
+    state.store.set_approval(tid, cid, body.granted)?;
+
+    let cancel = CancellationToken::new();
+    {
+        let mut map = state.cancel_tokens.lock().await;
+        map.insert(tid, cancel.clone());
+    }
+
+    let store = state.store.clone();
+    let tools = state.tools.clone();
+    let router = state.router.clone();
+    let config = state.config.clone();
+    let root = state.project_root.clone();
+    let slots = state.task_slots.clone();
+
+    tokio::spawn(async move {
+        let Ok(_permit) = slots.acquire().await else {
+            return;
+        };
+        let orch = Orchestrator::with_router(store, tools, router, config, root);
+        let _ = orch.run(tid, cancel).await;
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "id": id,
+            "call_id": body.call_id,
+            "granted": body.granted,
+            "resumed": true,
+        })),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoryQuery {
+    pub q: Option<String>,
+    pub kind: Option<String>,
+    #[serde(default = "default_memory_limit")]
+    pub limit: u32,
+}
+
+fn default_memory_limit() -> u32 {
+    20
+}
+
+async fn list_project_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MemoryQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let pid: ProjectId = id
+        .parse()
+        .map_err(|_| ApiError::bad("invalid project id"))?;
+    let _ = state
+        .store
+        .get_project(pid)?
+        .ok_or_else(|| ApiError::not_found("project not found"))?;
+    let rows = if let Some(q) = query.q.as_deref().filter(|s| !s.trim().is_empty()) {
+        state.store.search_memories(pid, q, query.limit)?
+    } else {
+        let kind = match query.kind.as_deref() {
+            Some(k) => Some(
+                MemoryKind::parse(k).ok_or_else(|| ApiError::bad(format!("unknown kind: {k}")))?,
+            ),
+            None => None,
+        };
+        state.store.list_memories(pid, kind, query.limit)?
+    };
+    Ok(Json(rows))
 }
 
 async fn list_events(

@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use raya_agent::Orchestrator;
 use raya_core::{
-    AgentTask, Config, LogFormat, TaskId, TaskPhase, ToolCallId, discover, init_tracing,
+    AgentTask, Config, LogFormat, MemoryKind, MemoryRecord, TaskId, TaskPhase, ToolCallId,
+    discover, init_tracing,
 };
 use raya_llm::{ModelRole, ModelRouter, OpenAiCompatibleProvider};
 use raya_policy::PolicyEngine;
@@ -74,8 +75,19 @@ enum AgentCommands {
     },
     /// Cancel a running task.
     Cancel { task_id: String },
-    /// Approve a pending tool call.
-    Approve { task_id: String, call_id: String },
+    /// Approve or deny a pending tool call (resumes by default).
+    Approve {
+        task_id: String,
+        call_id: String,
+        /// Deny instead of grant.
+        #[arg(long)]
+        deny: bool,
+        /// Record the decision without resuming the orchestrator.
+        #[arg(long)]
+        no_resume: bool,
+    },
+    /// Resume a task waiting for approval (or continue from checkpoint).
+    Resume { task_id: String },
     /// Index the repository (hashes, FTS5, symbols).
     Index,
     /// Recent file/tool activity across tasks.
@@ -87,11 +99,41 @@ enum AgentCommands {
     Receipt { task_id: String },
     /// Explain a file with bounded context.
     Explain { file: PathBuf },
+    /// Inspect or edit selective project memory.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
     /// List or probe configured LLM lanes.
     Llm {
         #[command(subcommand)]
         command: LlmCommands,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommands {
+    /// List recent memories.
+    List {
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Search memories by query.
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Add a project memory note.
+    Add {
+        text: String,
+        #[arg(long, default_value = "project")]
+        kind: String,
+    },
+    /// Delete a memory by id.
+    Forget { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -272,19 +314,66 @@ async fn run() -> Result<ExitCode> {
                     ExitCode::FAILURE
                 })
             }
-            AgentCommands::Approve { task_id, call_id } => {
+            AgentCommands::Approve {
+                task_id,
+                call_id,
+                deny,
+                no_resume,
+            } => {
                 let tid: TaskId = task_id.parse().context("task id")?;
                 let cid: ToolCallId = call_id.parse().context("call id")?;
-                store.set_approval(tid, cid, true)?;
+                let granted = !deny;
+                store.set_approval(tid, cid, granted)?;
                 if cli.json {
                     println!(
                         "{}",
-                        serde_json::json!({"approved": true, "task_id": task_id, "call_id": call_id})
+                        serde_json::json!({
+                            "approved": granted,
+                            "denied": deny,
+                            "task_id": task_id,
+                            "call_id": call_id,
+                            "resumed": !no_resume,
+                        })
                     );
                 } else {
-                    println!("approved {call_id} for task {task_id}");
+                    println!(
+                        "{} {call_id} for task {task_id}",
+                        if granted { "approved" } else { "denied" }
+                    );
                 }
-                Ok(ExitCode::SUCCESS)
+                if no_resume {
+                    return Ok(ExitCode::SUCCESS);
+                }
+                let orch = Orchestrator::with_router(
+                    store.clone(),
+                    tools,
+                    router,
+                    config.clone(),
+                    project.path().to_path_buf(),
+                );
+                let cancel = CancellationToken::new();
+                let finished = orch.run(tid, cancel).await.context("orchestrator resume")?;
+                if !cli.json {
+                    print_task(false, &finished);
+                } else {
+                    print_task(true, &finished);
+                }
+                Ok(exit_for_phase(finished.phase))
+            }
+            AgentCommands::Resume { task_id } => {
+                let tid: TaskId = task_id.parse().context("task id")?;
+                let orch = Orchestrator::with_router(
+                    store.clone(),
+                    tools,
+                    router,
+                    config.clone(),
+                    project.path().to_path_buf(),
+                );
+                let cancel = CancellationToken::new();
+                info!(task_id = %tid, "resuming task");
+                let finished = orch.run(tid, cancel).await.context("orchestrator resume")?;
+                print_task(cli.json, &finished);
+                Ok(exit_for_phase(finished.phase))
             }
             AgentCommands::Index => {
                 let stats = raya_index::index_project(&store, project.path())
@@ -412,6 +501,73 @@ async fn run() -> Result<ExitCode> {
                 }
                 Ok(ExitCode::SUCCESS)
             }
+            AgentCommands::Memory { command } => match command {
+                MemoryCommands::List { kind, limit } => {
+                    let kind = match kind.as_deref() {
+                        Some(k) => Some(
+                            MemoryKind::parse(k)
+                                .ok_or_else(|| anyhow::anyhow!("unknown memory kind: {k}"))?,
+                        ),
+                        None => None,
+                    };
+                    let rows = store.list_memories(project_rec.id, kind, limit)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else {
+                        for m in rows {
+                            println!(
+                                "{}\t{}\t{}",
+                                m.id,
+                                m.kind.as_str(),
+                                truncate(&m.content, 80)
+                            );
+                        }
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                MemoryCommands::Search { query, limit } => {
+                    let rows = store.search_memories(project_rec.id, &query, limit)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else {
+                        for m in rows {
+                            println!(
+                                "{}\t{}\t{}",
+                                m.id,
+                                m.kind.as_str(),
+                                truncate(&m.content, 80)
+                            );
+                        }
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                MemoryCommands::Add { text, kind } => {
+                    let kind = MemoryKind::parse(&kind)
+                        .ok_or_else(|| anyhow::anyhow!("unknown memory kind: {kind}"))?;
+                    let mem = MemoryRecord::new(project_rec.id, kind, text, None);
+                    let id = mem.id.clone();
+                    store.upsert_memory(&mem)?;
+                    if cli.json {
+                        println!("{}", serde_json::json!({"id": id, "kind": kind.as_str()}));
+                    } else {
+                        println!("added memory {id} ({})", kind.as_str());
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                MemoryCommands::Forget { id } => {
+                    let ok = store.delete_memory(&id)?;
+                    if cli.json {
+                        println!("{}", serde_json::json!({"deleted": ok, "id": id}));
+                    } else {
+                        println!("{}", if ok { "deleted" } else { "not found" });
+                    }
+                    Ok(if ok {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    })
+                }
+            },
             AgentCommands::Llm { command } => match command {
                 LlmCommands::Lanes => cmd_llm_lanes(&config, cli.json),
                 LlmCommands::Routes => cmd_llm_routes(&router, &config, cli.json),
