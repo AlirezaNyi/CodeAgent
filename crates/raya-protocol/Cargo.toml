@@ -1,0 +1,31 @@
+[package]
+name = "raya-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local HTTP API for RAYA Agent"
+
+[dependencies]
+axum = { workspace = true }
+chrono = { workspace = true }
+raya-agent = { workspace = true }
+raya-core = { workspace = true }
+raya-llm = { workspace = true }
+raya-policy = { workspace = true }
+raya-store = { workspace = true }
+raya-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+ignore = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true
