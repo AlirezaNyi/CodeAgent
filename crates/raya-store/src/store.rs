@@ -5,7 +5,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use raya_core::{
-    AgentTask, Event, EventKind, ExecutionPlan, ProjectId, TaskId, TaskPhase, ToolCallId,
+    AgentTask, Event, EventKind, EvidenceKind, ExecutionPlan, ProjectId, TaskId, TaskPhase,
+    ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
@@ -16,6 +17,7 @@ use uuid::Uuid;
 use crate::error::{StoreError, StoreResult};
 
 const MIGRATION_0001: &str = include_str!("../../../migrations/0001_init.sql");
+const MIGRATION_0002: &str = include_str!("../../../migrations/0002_index.sql");
 
 /// Persisted project row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -353,7 +355,7 @@ impl Store {
         let conn = self.lock()?;
         let after = after_seq.unwrap_or(0);
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, kind, payload_json, created_at, seq
+            "SELECT id, task_id, kind, payload_json, created_at, seq, evidence
              FROM events
              WHERE task_id = ?1 AND seq > ?2
              ORDER BY seq ASC
@@ -446,6 +448,15 @@ impl Store {
         .optional()
         .map_err(Into::into)
     }
+
+    /// Run a closure with exclusive access to the SQLite connection.
+    pub fn with_conn<F, T>(&self, f: F) -> StoreResult<T>
+    where
+        F: FnOnce(&Connection) -> StoreResult<T>,
+    {
+        let conn = self.lock()?;
+        f(&conn)
+    }
 }
 
 fn configure_connection(conn: &Connection) -> StoreResult<()> {
@@ -458,13 +469,15 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
 }
 
 fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
-    // rusqlite_migration expects migrations without PRAGMA; strip leading pragma lines.
-    let sql = MIGRATION_0001
-        .lines()
-        .filter(|l| !l.trim().starts_with("PRAGMA"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let migrations = Migrations::new(vec![M::up(&sql)]);
+    let strip = |sql: &str| {
+        sql.lines()
+            .filter(|l| !l.trim().starts_with("PRAGMA"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let m1 = strip(MIGRATION_0001);
+    let m2 = strip(MIGRATION_0002);
+    let migrations = Migrations::new(vec![M::up(&m1), M::up(&m2)]);
     migrations.to_latest(conn)?;
     Ok(())
 }
@@ -578,6 +591,7 @@ fn map_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     let kind: String = row.get(2)?;
     let payload: String = row.get(3)?;
     let created_at: String = row.get(4)?;
+    let evidence_str: String = row.get(6)?;
     Ok(Event {
         id: raya_core::EventId::from_uuid(parse_uuid(&id, 0)?),
         task_id: TaskId::from_uuid(parse_uuid(&task_id, 1)?),
@@ -588,6 +602,7 @@ fn map_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
                 Box::new(std::io::Error::other(format!("bad event kind {kind}"))),
             )
         })?,
+        evidence: EvidenceKind::parse(&evidence_str).unwrap_or(EvidenceKind::Unknown),
         payload: serde_json::from_str(&payload).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
         })?,
@@ -602,8 +617,8 @@ fn insert_event(conn: &Connection, event: &Event) -> StoreResult<()> {
         |row| row.get(0),
     )?;
     conn.execute(
-        "INSERT INTO events (id, task_id, kind, payload_json, created_at, seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO events (id, task_id, kind, payload_json, created_at, seq, evidence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             event.id.to_string(),
             event.task_id.to_string(),
@@ -611,6 +626,7 @@ fn insert_event(conn: &Connection, event: &Event) -> StoreResult<()> {
             serde_json::to_string(&event.payload)?,
             event.created_at.to_rfc3339(),
             next_seq,
+            event.evidence.as_str(),
         ],
     )?;
     Ok(())
