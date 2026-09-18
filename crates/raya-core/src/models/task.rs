@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::ids::{ProjectId, TaskId};
 use super::plan::ExecutionPlan;
+use super::tool::ToolCall;
+use crate::models::llm::Message;
 
 /// High-level task status derived from the current phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +152,26 @@ impl AgentTask {
 
     pub fn status(&self) -> TaskStatus {
         self.phase.status()
+    }
+}
+
+/// Durable orchestrator checkpoint for approval resume (Phase 3 Slice B).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskCheckpoint {
+    pub task_id: TaskId,
+    pub pending_call: Option<ToolCall>,
+    pub messages: Vec<Message>,
+    pub review_rounds: u32,
+}
+
+impl TaskCheckpoint {
+    pub fn new(task_id: TaskId, messages: Vec<Message>, pending_call: Option<ToolCall>) -> Self {
+        Self {
+            task_id,
+            pending_call,
+            messages,
+            review_rounds: 0,
+        }
     }
 }
 

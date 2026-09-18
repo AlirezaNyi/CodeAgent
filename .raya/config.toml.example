@@ -49,6 +49,11 @@ max_processes = 8
 # debug = "ollama"
 # summary = "ollama"
 
+[memory]
+enabled = true
+max_items = 5
+max_tokens = 2000
+
 [llm]
 # "mock" for offline tests; "openai" or "local" for OpenAI-compatible APIs
 # ("local" is an alias for the same HTTP client — use for Ollama / LM Studio / etc.)

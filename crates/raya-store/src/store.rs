@@ -5,8 +5,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use raya_core::{
-    AgentTask, Event, EventKind, EvidenceKind, ExecutionPlan, ProjectId, TaskId, TaskPhase,
-    ToolCallId,
+    AgentTask, Event, EventKind, EvidenceKind, ExecutionPlan, MemoryKind, MemoryRecord, Message,
+    ProjectId, TaskCheckpoint, TaskId, TaskPhase, ToolCall, ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
@@ -18,6 +18,7 @@ use crate::error::{StoreError, StoreResult};
 
 const MIGRATION_0001: &str = include_str!("../../../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../../../migrations/0002_index.sql");
+const MIGRATION_0003: &str = include_str!("../../../migrations/0003_memory_checkpoints.sql");
 
 /// Persisted project row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -417,6 +418,11 @@ impl Store {
     }
 
     pub fn is_approved(&self, call_id: ToolCallId) -> StoreResult<bool> {
+        Ok(self.approval_status(call_id)? == Some(true))
+    }
+
+    /// `None` = pending / no row; `Some(true)` = granted; `Some(false)` = denied.
+    pub fn approval_status(&self, call_id: ToolCallId) -> StoreResult<Option<bool>> {
         let conn = self.lock()?;
         let granted: Option<i32> = conn
             .query_row(
@@ -425,7 +431,226 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(granted == Some(1))
+        Ok(granted.map(|g| g != 0))
+    }
+
+    pub fn save_checkpoint(&self, cp: &TaskCheckpoint) -> StoreResult<()> {
+        let conn = self.lock()?;
+        let pending = match &cp.pending_call {
+            Some(call) => Some(
+                serde_json::to_string(call)
+                    .map_err(|e| StoreError::Message(format!("serialize pending_call: {e}")))?,
+            ),
+            None => None,
+        };
+        let messages = serde_json::to_string(&cp.messages)
+            .map_err(|e| StoreError::Message(format!("serialize messages: {e}")))?;
+        conn.execute(
+            "INSERT INTO task_checkpoints (task_id, pending_call_json, messages_json, review_rounds, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(task_id) DO UPDATE SET
+               pending_call_json = excluded.pending_call_json,
+               messages_json = excluded.messages_json,
+               review_rounds = excluded.review_rounds,
+               updated_at = excluded.updated_at",
+            params![
+                cp.task_id.to_string(),
+                pending,
+                messages,
+                cp.review_rounds as i64,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_checkpoint(&self, task_id: TaskId) -> StoreResult<Option<TaskCheckpoint>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT task_id, pending_call_json, messages_json, review_rounds
+             FROM task_checkpoints WHERE task_id = ?1",
+            params![task_id.to_string()],
+            |row| {
+                let tid: String = row.get(0)?;
+                let pending_json: Option<String> = row.get(1)?;
+                let messages_json: String = row.get(2)?;
+                let review_rounds: i64 = row.get(3)?;
+                let pending_call = match pending_json {
+                    Some(s) if !s.is_empty() => Some(
+                        serde_json::from_str::<ToolCall>(&s).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?,
+                    ),
+                    _ => None,
+                };
+                let messages: Vec<Message> = serde_json::from_str(&messages_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok(TaskCheckpoint {
+                    task_id: TaskId::from_uuid(Uuid::parse_str(&tid).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?),
+                    pending_call,
+                    messages,
+                    review_rounds: review_rounds as u32,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn delete_checkpoint(&self, task_id: TaskId) -> StoreResult<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "DELETE FROM task_checkpoints WHERE task_id = ?1",
+            params![task_id.to_string()],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn upsert_memory(&self, mem: &MemoryRecord) -> StoreResult<()> {
+        let conn = self.lock()?;
+        let tags = serde_json::to_string(&mem.tags)
+            .map_err(|e| StoreError::Message(format!("serialize tags: {e}")))?;
+        let task_id = mem.task_id.map(|t| t.to_string());
+        conn.execute(
+            "INSERT INTO memories (id, project_id, task_id, kind, key, content, tags_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+               project_id = excluded.project_id,
+               task_id = excluded.task_id,
+               kind = excluded.kind,
+               key = excluded.key,
+               content = excluded.content,
+               tags_json = excluded.tags_json,
+               updated_at = excluded.updated_at",
+            params![
+                mem.id,
+                mem.project_id.to_string(),
+                task_id,
+                mem.kind.as_str(),
+                mem.key,
+                mem.content,
+                tags,
+                mem.created_at.to_rfc3339(),
+                mem.updated_at.to_rfc3339()
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM memories_fts WHERE memory_id = ?1",
+            params![mem.id],
+        )?;
+        conn.execute(
+            "INSERT INTO memories_fts (memory_id, content) VALUES (?1, ?2)",
+            params![mem.id, mem.content],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_memories(
+        &self,
+        project_id: ProjectId,
+        kind: Option<MemoryKind>,
+        limit: u32,
+    ) -> StoreResult<Vec<MemoryRecord>> {
+        let conn = self.lock()?;
+        let limit = limit as i64;
+        let mut out = Vec::new();
+        if let Some(k) = kind {
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, task_id, kind, key, content, tags_json, created_at, updated_at
+                 FROM memories
+                 WHERE project_id = ?1 AND kind = ?2
+                 ORDER BY updated_at DESC
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(
+                params![project_id.to_string(), k.as_str(), limit],
+                map_memory,
+            )?;
+            for row in rows {
+                out.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, task_id, kind, key, content, tags_json, created_at, updated_at
+                 FROM memories
+                 WHERE project_id = ?1
+                 ORDER BY updated_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![project_id.to_string(), limit], map_memory)?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn search_memories(
+        &self,
+        project_id: ProjectId,
+        query: &str,
+        limit: u32,
+    ) -> StoreResult<Vec<MemoryRecord>> {
+        let conn = self.lock()?;
+        let limit = limit as i64;
+        let q = fts_query(query);
+        let mut out = Vec::new();
+        if q.is_empty() {
+            return self.list_memories(project_id, None, limit as u32);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.project_id, m.task_id, m.kind, m.key, m.content, m.tags_json, m.created_at, m.updated_at
+             FROM memories_fts
+             JOIN memories m ON m.id = memories_fts.memory_id
+             WHERE m.project_id = ?1 AND memories_fts MATCH ?2
+             ORDER BY m.updated_at DESC
+             LIMIT ?3",
+        )?;
+        match stmt.query_map(params![project_id.to_string(), q, limit], map_memory) {
+            Ok(rows) => {
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            Err(_) => {}
+        }
+        if out.is_empty() {
+            let like = format!("%{}%", query.trim());
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, task_id, kind, key, content, tags_json, created_at, updated_at
+                 FROM memories
+                 WHERE project_id = ?1 AND content LIKE ?2
+                 ORDER BY updated_at DESC
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![project_id.to_string(), like, limit], map_memory)?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn delete_memory(&self, id: &str) -> StoreResult<bool> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM memories_fts WHERE memory_id = ?1", params![id])?;
+        let n = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        Ok(n > 0)
     }
 
     pub fn set_index_meta(&self, key: &str, value: &str) -> StoreResult<()> {
@@ -477,7 +702,8 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
     };
     let m1 = strip(MIGRATION_0001);
     let m2 = strip(MIGRATION_0002);
-    let migrations = Migrations::new(vec![M::up(&m1), M::up(&m2)]);
+    let m3 = strip(MIGRATION_0003);
+    let migrations = Migrations::new(vec![M::up(&m1), M::up(&m2), M::up(&m3)]);
     migrations.to_latest(conn)?;
     Ok(())
 }
@@ -632,6 +858,59 @@ fn insert_event(conn: &Connection, event: &Event) -> StoreResult<()> {
     Ok(())
 }
 
+fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
+    let id: String = row.get(0)?;
+    let project_id: String = row.get(1)?;
+    let task_id: Option<String> = row.get(2)?;
+    let kind: String = row.get(3)?;
+    let key: Option<String> = row.get(4)?;
+    let content: String = row.get(5)?;
+    let tags_json: String = row.get(6)?;
+    let created_at: String = row.get(7)?;
+    let updated_at: String = row.get(8)?;
+    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+    Ok(MemoryRecord {
+        id,
+        project_id: ProjectId::from_uuid(parse_uuid(&project_id, 1)?),
+        task_id: match task_id.as_deref() {
+            Some(s) => Some(TaskId::from_uuid(parse_uuid(s, 2)?)),
+            None => None,
+        },
+        kind: MemoryKind::parse(&kind).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(format!("bad memory kind {kind}"))),
+            )
+        })?,
+        key,
+        content,
+        tags,
+        created_at: parse_dt(&created_at)?,
+        updated_at: parse_dt(&updated_at)?,
+    })
+}
+
+/// Build a loose FTS5 MATCH query from free text.
+fn fts_query(query: &str) -> String {
+    query
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .map(|t| {
+            let clean: String = t
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            if clean.is_empty() {
+                String::new()
+            } else {
+                format!("\"{clean}\"")
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 fn parse_uuid(s: &str, idx: usize) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
@@ -752,5 +1031,84 @@ mod tests {
         let mut sorted = seqs.clone();
         sorted.sort_unstable();
         assert_eq!(seqs, sorted);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip() {
+        use raya_core::{Message, TaskCheckpoint, ToolCall};
+        let store = Store::open_in_memory().unwrap();
+        let project = store
+            .create_project(Path::new("/tmp/cp"), "proj")
+            .unwrap();
+        let task = sample_task(project.id);
+        store.create_task(&task).unwrap();
+        let call = ToolCall::new("shell.exec", serde_json::json!({"command": "echo hi"}));
+        let cp = TaskCheckpoint {
+            task_id: task.id,
+            pending_call: Some(call.clone()),
+            messages: vec![Message::user("hi"), Message::assistant("ok")],
+            review_rounds: 1,
+        };
+        store.save_checkpoint(&cp).unwrap();
+        let loaded = store.load_checkpoint(task.id).unwrap().unwrap();
+        assert_eq!(loaded.review_rounds, 1);
+        assert_eq!(loaded.pending_call.as_ref().unwrap().name, "shell.exec");
+        assert_eq!(loaded.messages.len(), 2);
+        assert!(store.delete_checkpoint(task.id).unwrap());
+        assert!(store.load_checkpoint(task.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn approval_status_three_states() {
+        let store = Store::open_in_memory().unwrap();
+        let project = store
+            .create_project(Path::new("/tmp/appr"), "proj")
+            .unwrap();
+        let task = sample_task(project.id);
+        store.create_task(&task).unwrap();
+        let call_id = ToolCallId::new();
+        assert_eq!(store.approval_status(call_id).unwrap(), None);
+        store.set_approval(task.id, call_id, true).unwrap();
+        assert_eq!(store.approval_status(call_id).unwrap(), Some(true));
+        store.set_approval(task.id, call_id, false).unwrap();
+        assert_eq!(store.approval_status(call_id).unwrap(), Some(false));
+        assert!(!store.is_approved(call_id).unwrap());
+    }
+
+    #[test]
+    fn memory_upsert_list_search_delete() {
+        use raya_core::{MemoryKind, MemoryRecord};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mem.db");
+        let project_id;
+        let mem_id;
+        {
+            let store = Store::open(&path).unwrap();
+            let project = store.create_project(dir.path(), "proj").unwrap();
+            project_id = project.id;
+            let task = sample_task(project.id);
+            store.create_task(&task).unwrap();
+            let mem = MemoryRecord::new(
+                project.id,
+                MemoryKind::Task,
+                "wrote hello.txt successfully for demo",
+                Some(task.id),
+            )
+            .with_key("summary");
+            mem_id = mem.id.clone();
+            store.upsert_memory(&mem).unwrap();
+            let listed = store
+                .list_memories(project.id, Some(MemoryKind::Task), 10)
+                .unwrap();
+            assert_eq!(listed.len(), 1);
+            let hits = store.search_memories(project.id, "hello.txt", 10).unwrap();
+            assert!(!hits.is_empty());
+            assert!(hits.iter().any(|m| m.id == mem_id));
+        }
+        let store = Store::open(&path).unwrap();
+        let listed = store.list_memories(project_id, None, 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(store.delete_memory(&mem_id).unwrap());
+        assert!(store.list_memories(project_id, None, 10).unwrap().is_empty());
     }
 }

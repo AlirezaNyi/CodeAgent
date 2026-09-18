@@ -21,6 +21,7 @@ pub struct Config {
     pub llm: LlmConfig,
     /// Phase/role → named lane mapping (empty string = active lane).
     pub models: ModelsConfig,
+    pub memory: MemoryConfig,
     pub server: ServerConfig,
 }
 
@@ -133,6 +134,12 @@ impl Config {
         }
         self.llm.validate_lanes()?;
         self.models.validate_against_lanes(&self.llm)?;
+        if self.memory.max_items == 0 {
+            return Err(ConfigError::Validation("memory.max_items must be >= 1".into()).into());
+        }
+        if self.memory.max_tokens == 0 {
+            return Err(ConfigError::Validation("memory.max_tokens must be >= 1".into()).into());
+        }
         Ok(())
     }
 
@@ -366,6 +373,25 @@ impl Default for ResourcesConfig {
             max_parallel_tools: 4,
             max_parallel_agents: 3,
             max_processes: 8,
+        }
+    }
+}
+
+/// Selective memory retrieval bounds (RFC §15).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    pub max_items: u32,
+    pub max_tokens: u64,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_items: 5,
+            max_tokens: 2000,
         }
     }
 }
