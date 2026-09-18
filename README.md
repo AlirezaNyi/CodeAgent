@@ -6,7 +6,7 @@ Cursor remains the editor UI. RAYA owns orchestration, bounded context, tools, p
 
 ## Status
 
-Phases 1–2 are implemented. Phase 3 Slice A (ADR 0011) adds a role-based model router and bounded ephemeral subagents. Slice B (ADR 0012) adds durable approval resume and SQLite project/task memory. Slice C (ADR 0013) adds an optional execution DAG on `plan.nodes`. Slice D (ADR 0014) adds an MCP stdio control plane (`raya mcp`) for Cursor.
+Phases 1–3 are implemented. Phase 3 covers subagents + model router (ADR 0011), durable approval + memory (ADR 0012), optional execution DAG with crash-resume (ADR 0013), and MCP stdio (`raya mcp`, ADR 0014). Phase 4 leftovers: Cursor extension, Streamable HTTP MCP, Web UI.
 
 `raya agent run` → SQLite task → plan → context → mock/OpenAI LLM → tools → verify → events.
 

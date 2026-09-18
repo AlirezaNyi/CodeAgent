@@ -25,16 +25,14 @@
 raya-agent/
 ├── Cargo.toml
 ├── crates/
-│   ├── raya-agent/
+│   ├── raya-agent/      # orchestrator + in-process subagent module
 │   ├── raya-core/
 │   ├── raya-cli/
 │   ├── raya-context/
 │   ├── raya-index/
 │   ├── raya-tools/
-│   ├── raya-mcp/
+│   ├── raya-mcp/        # MCP stdio control plane (ADR 0014)
 │   ├── raya-llm/
-│   ├── raya-subagent/
-│   ├── raya-memory/
 │   ├── raya-policy/
 │   ├── raya-executor/
 │   └── raya-protocol/
@@ -43,6 +41,8 @@ raya-agent/
 ├── docs/
 └── tests/
 ```
+
+Note: RFC originally listed `raya-subagent` / `raya-memory` as separate crates. Phase 3 keeps subagents as `raya-agent::subagent` and memory in `raya-store` + `raya-core` models (ADR 0011 / 0012). Extract crates only if a future boundary needs them.
 
 Dependency direction:
 
@@ -55,10 +55,10 @@ raya-protocol ──────────┤
                          │
         ┌────────────────┼─────────────────┐
         ▼                ▼                 ▼
-   raya-context     raya-subagent     raya-executor
+   raya-context       raya-llm        raya-executor
         │                │                 │
         ▼                ▼                 ▼
-   raya-index        raya-llm         raya-policy
+   raya-index      raya-store/tools   raya-policy
                          │
                          ▼
                       SQLite
@@ -359,6 +359,8 @@ Do not duplicate the complete parent context.
 
 **Slice D (ADR 0014):** `raya-mcp` stdio MCP control plane for Cursor (`raya mcp`); tools wrap Store/Orchestrator only — no filesystem/shell MCP tools.
 
+**Slice E (ADR 0013 follow-up):** DAG crash-resume of in-flight waves. Phase 3 Agentic Runtime is complete.
+
 ## 13. Execution DAG
 
 For complex tasks:
@@ -383,11 +385,11 @@ Tests    Review
 
 The DAG is optional for simple tasks.
 
-**Slice C (ADR 0013):** plans may include additive `nodes: [{id, role, objective, paths, depends_on}]`. Empty/omitted nodes keep the sequential parent LLM loop. The orchestrator runs ready nodes in waves via existing subagents (`subagent.max_parallel`, `max_dag_nodes`). Status is persisted in `task_dag_nodes` for `raya agent dag` / `GET /v1/tasks/{id}/dag`. Failed nodes skip dependents; the parent task is not auto-failed. Crash-resume of an in-flight DAG is out of scope for this slice.
+**Slice C (ADR 0013):** plans may include additive `nodes: [{id, role, objective, paths, depends_on}]`. Empty/omitted nodes keep the sequential parent LLM loop. The orchestrator runs ready nodes in waves via existing subagents (`subagent.max_parallel`, `max_dag_nodes`). Status is persisted in `task_dag_nodes` for `raya agent dag` / `GET /v1/tasks/{id}/dag`. Failed nodes skip dependents; the parent task is not auto-failed.
 
-**Slice D (ADR 0014):** `crates/raya-mcp` is implemented (not a stub). Stdio MCP via `rmcp` exposes control-plane tools (`raya_run`, `raya_status`, `raya_logs`, `raya_approve`, `raya_resume`, `raya_cancel`, `raya_dag`, `raya_memory_*`). CLI `raya mcp` blocks on stdin for Cursor `mcp.json`. Streamable HTTP MCP and richer Cursor extension remain Phase 4.
+**Slice E (ADR 0013 follow-up):** crash-resume of in-flight DAG waves — checkpoint before waves; `Orchestrator::run` resumes non-terminal tasks with incomplete `task_dag_nodes` (reset `running` → `pending`, no `replace_dag`). CLI / MCP `raya_resume` reuse `Orchestrator::run`. Streamable HTTP MCP, Cursor extension, and Web UI remain Phase 4.
 
-## 14. LLM Gateway
+MCP stdio control plane is documented under Slice D (ADR 0014) in §12.
 
 ```rust
 #[async_trait]

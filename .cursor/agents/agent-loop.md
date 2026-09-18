@@ -24,12 +24,13 @@ You are the RAYA agent-loop engineer. You own the task runtime and its observabi
 - Phase 3 Slice A: subagent scheduler/roles/runner, model-router wiring (ADR 0011)
 - Phase 3 Slice B: durable approval checkpoint/resume + Task/Decision memory (ADR 0012)
 - Phase 3 Slice C: optional `ExecutionPlan.nodes` wave scheduler (ADR 0013)
+- Phase 3 Slice E: DAG crash-resume of in-flight waves (ADR 0013 follow-up)
 - MCP stdio (`raya-mcp` / `raya mcp`) is owned by the **main** agent, not this specialist (ADR 0014)
 
 ## Does not own
 
 - Policy classify / safe_path / executor (`runtime-safety`) — except calling `execute_approved` after grant
-- Migration SQL / Store internals (`persistence`) — call Store APIs only (`replace_dag`, `list_dag_nodes`, …)
+- Migration SQL / Store internals (`persistence`) — call Store APIs only (`replace_dag`, `list_dag_nodes`, `reset_running_dag_nodes`, …)
 - Ranking weights / FTS query shape (`context-engine`)
 - CLI clap / axum routes / LLM HTTP client / MCP stdio crate (main agent)
 - Git commits
@@ -44,7 +45,7 @@ You are the RAYA agent-loop engineer. You own the task runtime and its observabi
 6. State-machine or event-string changes require an ADR under `docs/adr/` (main agent may write the ADR file if you only implement code — flag the need clearly).
 7. Do not silently “fix” known defects unless tasked. Document them if you touch nearby code:
    - ~~Approval resume across process boundaries~~ — fixed in ADR 0012.
-   - DAG crash-resume of in-flight waves is intentionally out of scope (ADR 0013).
+   - ~~DAG crash-resume of in-flight waves~~ — fixed in Slice E / ADR 0013.
    - `resources.add_tokens` errors are currently ignored (`let _ =`).
 8. Do not commit.
 

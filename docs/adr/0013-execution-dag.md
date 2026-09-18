@@ -10,14 +10,15 @@ RFC §13 describes an execution DAG for complex tasks. Slice A delivered ephemer
 1. **Optional overlay on `ExecutionPlan`.** Additive `nodes: Vec<DagNode>` with `#[serde(default)]`. Empty/absent nodes keep today’s sequential loop unchanged.
 2. **No new `AgentDecision`, `TaskPhase`, or `EventKind`.** DAG workers reuse `agent.spawned` / `agent.completed` with payload `dag_node_id`.
 3. **Wave scheduler** in `raya-agent::subagent::dag` over existing `SubagentRunner`, bounded by `subagent.max_parallel` (semaphore) and `max_dag_nodes` (default 8). Invalid graphs (`validate_dag`) are skipped with a warning — non-fatal.
-4. **Persist for observability** via migration `0004` `task_dag_nodes` (status pending|running|completed|failed|skipped). CLI `raya agent dag` and HTTP `GET /v1/tasks/{id}/dag`. Rows deleted on terminal phases. **No crash-resume** of an in-flight DAG in this slice (`Orchestrator::run` still only starts from `Created` or `WaitingApproval`).
+4. **Persist for observability** via migration `0004` `task_dag_nodes` (status pending|running|completed|failed|skipped). CLI `raya agent dag` and HTTP `GET /v1/tasks/{id}/dag`. Rows deleted on terminal phases.
 5. **Skip-on-fail.** A failed node skips dependents; the parent task is not auto-failed — the parent LLM receives a DAG report and may `needs_fix` / `finish`.
+6. **Crash-resume of in-flight waves (Slice E).** Before DAG waves, persist a checkpoint (`pending_call = None`). `Orchestrator::run` may resume a non-terminal task with incomplete `task_dag_nodes`: reset `running` → `pending`, do **not** `replace_dag`, continue from `ready_nodes`. No new `TaskPhase` / `EventKind` / migration. CLI and MCP `resume` reuse the same path (HTTP approve resumes after grant; there is no separate HTTP `/resume` route).
 
 ## Alternatives
 - New `TaskPhase::RunningDag` + EventKinds — contract churn without product need.
-- Separate `raya-subagent` crate — deferred until MCP needs a boundary (ADR 0011).
+- Separate `raya-subagent` crate — deferred (ADR 0011); MCP did not require the boundary (ADR 0014).
 - Replay DAG from events only — weaker CLI/HTTP status than a small status table.
 
 ## Consequences
-- Prompts may emit `plan.nodes`; operators inspect status via CLI/HTTP.
-- Follow-up: crash-resume of DAG waves, richer project memory curation. MCP landed in ADR 0014.
+- Prompts may emit `plan.nodes`; operators inspect status via CLI/HTTP; crashed mid-DAG tasks resume via `raya agent resume`.
+- Phase 4 leftovers: richer project memory curation, Cursor extension, Streamable HTTP MCP, Web UI.

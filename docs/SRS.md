@@ -25,7 +25,7 @@ The application shall run as a local Rust process.
 The application shall persist task state in SQLite.
 
 ### SYS-003
-The application shall support CLI and local HTTP interfaces.
+The application shall support CLI, local HTTP, and stdio MCP interfaces.
 
 ### SYS-004
 The application shall expose health status.
@@ -280,6 +280,32 @@ GET `/metrics` shall expose operational metrics where implemented.
 
 ### REQ-CLI-005
 `raya agent index` shall trigger indexing.
+
+### REQ-CLI-006
+`raya agent resume` shall resume a task waiting for approval or with an incomplete execution DAG.
+
+### REQ-CLI-007
+`raya agent dag` shall show optional DAG node status for a task.
+
+### REQ-CLI-008
+`raya agent memory` shall list, search, add, and forget project memories.
+
+### REQ-CLI-009
+`raya mcp` shall start the stdio MCP control-plane server for Cursor.
+
+## 18b. Memory / DAG / MCP Requirements
+
+### REQ-MEM-001
+The system shall persist project/task/decision/agent memories locally with bounded FTS recall (ADR 0012).
+
+### REQ-DAG-001
+Plans may include an optional execution DAG (`nodes`); waves run bounded subagents and status persists in SQLite (ADR 0013).
+
+### REQ-DAG-002
+An incomplete in-flight DAG shall be resumable after process crash without resetting completed nodes (Slice E).
+
+### REQ-MCP-001
+The system shall expose stdio MCP tools for run/status/logs/approve/resume/cancel/memory/dag without exposing filesystem/shell over MCP (ADR 0014).
 
 ## 19. Configuration Requirements
 

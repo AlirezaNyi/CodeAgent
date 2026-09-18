@@ -63,16 +63,14 @@ Create or preserve this conceptual structure:
 raya-agent/
 ├── Cargo.toml
 ├── crates/
-│   ├── raya-agent/
+│   ├── raya-agent/      # orchestrator + in-process subagent module
 │   ├── raya-core/
 │   ├── raya-cli/
 │   ├── raya-context/
 │   ├── raya-index/
 │   ├── raya-tools/
-│   ├── raya-mcp/
+│   ├── raya-mcp/        # MCP stdio (ADR 0014)
 │   ├── raya-llm/
-│   ├── raya-subagent/
-│   ├── raya-memory/
 │   ├── raya-policy/
 │   ├── raya-executor/
 │   └── raya-protocol/
@@ -89,7 +87,7 @@ raya-agent/
 └── tests/
 ```
 
-Do not create all modules as empty abstractions just for appearance. Implement a useful vertical slice first.
+Do not create empty `raya-subagent` / `raya-memory` crates; those live in `raya-agent::subagent` and `raya-store` (ADR 0011 / 0012). Do not create all modules as empty abstractions just for appearance. Implement a useful vertical slice first.
 
 ## 5. Implementation Order
 
@@ -391,15 +389,15 @@ The system should be able to answer:
 
 ## 7. Phase 3
 
-Implement:
+**Complete** (Slices A–E / ADR 0011–0014):
 
-- bounded subagents;
+- bounded subagents (in-process);
 - Planner/Coder/Reviewer/Debugger roles;
 - scheduler;
-- execution DAG;
+- execution DAG (optional `plan.nodes`) with crash-resume;
 - model router;
-- memory;
-- MCP integration.
+- memory (SQLite + FTS);
+- MCP stdio (`raya mcp`).
 
 Subagent requirements:
 
@@ -415,11 +413,12 @@ Subagents receive minimal context, not the complete parent context.
 
 Implement:
 
-- Cursor integration;
-- richer MCP interface;
+- Cursor integration / extension;
+- richer MCP interface (Streamable HTTP);
 - local Web UI if useful;
 - resource dashboard;
 - advanced approval workflow;
+- richer memory curation;
 - profiling and optimization.
 
 ## 9. Code Quality Rules

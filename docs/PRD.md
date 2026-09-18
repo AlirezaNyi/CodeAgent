@@ -280,7 +280,7 @@ MVP includes:
 MVP excludes:
 
 - full Tree-sitter graph;
-- advanced subagent DAG / durable memory / MCP (Phase 3 Slices B–D landed; richer MCP / Cursor extension remain Phase 4);
+- advanced subagent DAG / durable memory / MCP stdio (Phase 3 complete; richer MCP / Cursor extension remain Phase 4);
 - vector search;
 - Cursor extension;
 - advanced memory retrieval;
@@ -294,11 +294,11 @@ CLI → Task → Context → LLM → Tools → Verify → Events.
 ### Phase 2 — Repository Intelligence
 Tree-sitter, incremental index, symbols, dependencies, FTS5, Git intelligence.
 
-### Phase 3 — Agentic Runtime
-Subagents, scheduler, model router, memory, optional execution DAG, MCP stdio (Slices A–D / ADR 0011–0014).
+### Phase 3 — Agentic Runtime (complete)
+Subagents, scheduler, model router, memory, optional execution DAG with crash-resume, MCP stdio (Slices A–E / ADR 0011–0014).
 
 ### Phase 4 — Developer Experience
-Richer Cursor integration (extension, Streamable HTTP MCP), Web UI, advanced policy UX, resource dashboard.
+Richer Cursor integration (extension, Streamable HTTP MCP), Web UI, advanced policy UX, resource dashboard, richer memory curation.
 
 ## 13. Success Metrics
 
