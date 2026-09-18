@@ -14,13 +14,13 @@ raya-llm = { workspace = true }
 raya-policy = { workspace = true }
 raya-store = { workspace = true }
 raya-tools = { workspace = true }
+raya-index = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
-ignore = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

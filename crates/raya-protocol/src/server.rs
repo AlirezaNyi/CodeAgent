@@ -233,6 +233,7 @@ async fn list_events(
                 "seq": seq,
                 "id": e.id.to_string(),
                 "kind": e.kind.as_str(),
+                "evidence": e.evidence.as_str(),
                 "payload": e.payload,
                 "created_at": e.created_at,
             })
@@ -265,32 +266,15 @@ async fn index_project(
         .store
         .get_project(pid)?
         .ok_or_else(|| ApiError::not_found("project not found"))?;
-    let mut count = 0u64;
-    for entry in walkdir_files(&project.root_path) {
-        let meta = std::fs::metadata(&entry).ok();
-        let len = meta.map(|m| m.len()).unwrap_or(0);
-        let key = format!("file:{}", entry.display());
-        state.store.set_index_meta(&key, &format!("{len}")).ok();
-        count += 1;
-    }
-    state
-        .store
-        .set_index_meta("last_index_count", &count.to_string())?;
-    Ok(Json(serde_json::json!({"indexed_files": count})))
-}
-
-fn walkdir_files(root: &std::path::Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .build();
-    for entry in walker.flatten() {
-        if entry.file_type().is_some_and(|t| t.is_file()) {
-            out.push(entry.into_path());
-        }
-    }
-    out
+    let stats = raya_index::index_project(&state.store, &project.root_path)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "scanned": stats.scanned,
+        "updated": stats.updated,
+        "unchanged": stats.unchanged,
+        "removed": stats.removed,
+        "symbols": stats.symbols,
+    })))
 }
 
 struct ApiError {
@@ -308,6 +292,12 @@ impl ApiError {
     fn not_found(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: msg.into(),
+        }
+    }
+    fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: msg.into(),
         }
     }
