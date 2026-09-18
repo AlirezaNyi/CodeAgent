@@ -476,15 +476,15 @@ impl Store {
                 let messages_json: String = row.get(2)?;
                 let review_rounds: i64 = row.get(3)?;
                 let pending_call = match pending_json {
-                    Some(s) if !s.is_empty() => Some(
-                        serde_json::from_str::<ToolCall>(&s).map_err(|e| {
+                    Some(s) if !s.is_empty() => {
+                        Some(serde_json::from_str::<ToolCall>(&s).map_err(|e| {
                             rusqlite::Error::FromSqlConversionFailure(
                                 1,
                                 rusqlite::types::Type::Text,
                                 Box::new(e),
                             )
-                        })?,
-                    ),
+                        })?)
+                    }
                     _ => None,
                 };
                 let messages: Vec<Message> = serde_json::from_str(&messages_json).map_err(|e| {
@@ -1037,9 +1037,7 @@ mod tests {
     fn checkpoint_roundtrip() {
         use raya_core::{Message, TaskCheckpoint, ToolCall};
         let store = Store::open_in_memory().unwrap();
-        let project = store
-            .create_project(Path::new("/tmp/cp"), "proj")
-            .unwrap();
+        let project = store.create_project(Path::new("/tmp/cp"), "proj").unwrap();
         let task = sample_task(project.id);
         store.create_task(&task).unwrap();
         let call = ToolCall::new("shell.exec", serde_json::json!({"command": "echo hi"}));
@@ -1109,6 +1107,11 @@ mod tests {
         let listed = store.list_memories(project_id, None, 10).unwrap();
         assert_eq!(listed.len(), 1);
         assert!(store.delete_memory(&mem_id).unwrap());
-        assert!(store.list_memories(project_id, None, 10).unwrap().is_empty());
+        assert!(
+            store
+                .list_memories(project_id, None, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
