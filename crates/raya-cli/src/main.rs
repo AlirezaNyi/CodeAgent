@@ -87,6 +87,23 @@ enum AgentCommands {
     Receipt { task_id: String },
     /// Explain a file with bounded context.
     Explain { file: PathBuf },
+    /// List or probe configured LLM lanes.
+    Llm {
+        #[command(subcommand)]
+        command: LlmCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LlmCommands {
+    /// List configured LLM lanes (and the active selection).
+    Lanes,
+    /// Probe `GET {base_url}/models` on the active (or named) lane.
+    Probe {
+        /// Override lane name for this probe.
+        #[arg(long)]
+        lane: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -113,6 +130,10 @@ async fn run() -> Result<ExitCode> {
 
     let project = discover(cli.project.as_deref()).context("project discovery failed")?;
     let mut config = Config::load(project.path()).context("failed to load config")?;
+    config
+        .llm
+        .apply_active_lane()
+        .context("failed to resolve llm lane")?;
     init_tracing(LogFormat::parse(&config.server.log_format));
 
     let db_path = config.database_path(project.path());
@@ -388,6 +409,12 @@ async fn run() -> Result<ExitCode> {
                 }
                 Ok(ExitCode::SUCCESS)
             }
+            AgentCommands::Llm { command } => match command {
+                LlmCommands::Lanes => cmd_llm_lanes(&config, cli.json),
+                LlmCommands::Probe { lane } => {
+                    cmd_llm_probe(&config, lane.as_deref(), cli.json).await
+                }
+            },
         },
         Commands::Serve { host, port } => {
             if let Some(h) = host {
@@ -417,10 +444,10 @@ async fn run() -> Result<ExitCode> {
 fn build_llm(config: &Config) -> Result<Arc<dyn LlmProvider>> {
     match config.llm.provider.to_ascii_lowercase().as_str() {
         "mock" => Ok(Arc::new(MockProvider::default_script())),
-        "openai" => {
-            let provider = OpenAiCompatibleProvider::from_env(
-                &config.llm.base_url,
-                &config.llm.model,
+        "openai" | "local" => {
+            let lane = config.llm.resolve_lane().map_err(|e| anyhow::anyhow!(e))?;
+            let provider = OpenAiCompatibleProvider::from_resolved(
+                &lane,
                 config.llm.timeout_seconds,
                 CancellationToken::new(),
             )
@@ -429,6 +456,113 @@ fn build_llm(config: &Config) -> Result<Arc<dyn LlmProvider>> {
         }
         other => bail!("unsupported llm.provider: {other}"),
     }
+}
+
+fn cmd_llm_lanes(config: &Config, json: bool) -> Result<ExitCode> {
+    let active = config.llm.resolve_lane().map_err(|e| anyhow::anyhow!(e))?;
+    let rows: Vec<serde_json::Value> = if config.llm.lanes.is_empty() {
+        vec![serde_json::json!({
+            "name": active.name,
+            "base_url": active.base_url,
+            "model": active.model,
+            "active": true,
+            "legacy": true,
+        })]
+    } else {
+        config
+            .llm
+            .lanes
+            .iter()
+            .map(|lane| {
+                serde_json::json!({
+                    "name": lane.name,
+                    "base_url": lane.base_url,
+                    "model": lane.model,
+                    "api_key_env": lane.api_key_env,
+                    "active": lane.name == active.name,
+                })
+            })
+            .collect()
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "provider": config.llm.provider,
+                "active_lane": active.name,
+                "lanes": rows,
+            })
+        );
+    } else {
+        println!(
+            "provider={}  active_lane={}",
+            config.llm.provider, active.name
+        );
+        for row in &rows {
+            let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let base = row.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+            let model = row.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            let marker = if row.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "*"
+            } else {
+                " "
+            };
+            println!("{marker} {name}\t{model}\t{base}");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_llm_probe(config: &Config, lane: Option<&str>, json: bool) -> Result<ExitCode> {
+    let mut cfg = config.clone();
+    if let Some(name) = lane {
+        cfg.llm.lane = name.to_string();
+        cfg.llm
+            .apply_active_lane()
+            .context("failed to resolve llm lane")?;
+    }
+    let resolved = cfg.llm.resolve_lane().map_err(|e| anyhow::anyhow!(e))?;
+    if cfg.llm.provider.eq_ignore_ascii_case("mock") && !json {
+        eprintln!(
+            "note: llm.provider is \"mock\"; probe still queries the HTTP lane at {}",
+            resolved.base_url
+        );
+    }
+    let provider = OpenAiCompatibleProvider::from_resolved(
+        &resolved,
+        cfg.llm.timeout_seconds,
+        CancellationToken::new(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    let models = provider
+        .probe_models()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "lane": resolved.name,
+                "base_url": resolved.base_url,
+                "configured_model": resolved.model,
+                "provider": cfg.llm.provider,
+                "models": models,
+            })
+        );
+    } else {
+        println!(
+            "lane={}  base_url={}  configured_model={}",
+            resolved.name, resolved.base_url, resolved.model
+        );
+        if models.is_empty() {
+            println!("(no models returned)");
+        } else {
+            for m in models {
+                println!("  {m}");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_task(json: bool, task: &AgentTask) {

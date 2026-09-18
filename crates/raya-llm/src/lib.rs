@@ -7,5 +7,5 @@ mod openai;
 mod provider;
 
 pub use mock::MockProvider;
-pub use openai::OpenAiCompatibleProvider;
+pub use openai::{OpenAiCompatibleProvider, is_loopback_base_url};
 pub use provider::{LlmError, LlmProvider, LlmResult};

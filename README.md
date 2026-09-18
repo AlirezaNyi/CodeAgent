@@ -38,7 +38,24 @@ cargo run -p raya-cli -- serve
 
 Copy [`.raya/config.toml.example`](.raya/config.toml.example) to `.raya/config.toml` to customize limits, policy, and LLM provider.
 
-Set `RAYA_LLM_API_KEY` (or `OPENAI_API_KEY`) when `llm.provider = "openai"`.
+### LLM providers and local lanes
+
+| `llm.provider` | Behavior |
+|----------------|----------|
+| `mock` | Offline scripted responses (default; used in tests) |
+| `openai` / `local` | OpenAI-compatible HTTP (`/chat/completions`) |
+
+`local` is an alias for the same client. Point `[[llm.lanes]]` (or legacy `base_url` / `model`) at Ollama, LM Studio, or any OpenAI-compatible server other agents on your machine already use. Select the active lane with `llm.lane` or `RAYA_LLM_LANE`.
+
+```bash
+cargo run -p raya-cli -- agent llm lanes
+cargo run -p raya-cli -- agent llm probe
+cargo run -p raya-cli -- agent llm probe --lane lmstudio
+```
+
+Loopback hosts (`127.0.0.1`, `localhost`, `::1`) do **not** require an API key (and do not forward ambient `OPENAI_API_KEY`). For non-loopback OpenAI-compatible endpoints, set `RAYA_LLM_API_KEY` (or `OPENAI_API_KEY`). For a loopback server that requires auth, set `api_key_env` on that lane.
+
+See [docs/adr/0010-local-llm-lanes.md](docs/adr/0010-local-llm-lanes.md).
 
 ## Workspace layout
 

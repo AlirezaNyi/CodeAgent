@@ -102,13 +102,14 @@ impl Config {
             .into());
         }
         let provider = self.llm.provider.to_ascii_lowercase();
-        if provider != "mock" && provider != "openai" {
+        if provider != "mock" && provider != "openai" && provider != "local" {
             return Err(ConfigError::Validation(format!(
-                "llm.provider must be \"mock\" or \"openai\", got \"{}\"",
+                "llm.provider must be \"mock\", \"openai\", or \"local\", got \"{}\"",
                 self.llm.provider
             ))
             .into());
         }
+        self.llm.validate_lanes()?;
         Ok(())
     }
 
@@ -121,6 +122,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("RAYA_LLM_MODEL") {
             self.llm.model = v;
+        }
+        if let Ok(v) = std::env::var("RAYA_LLM_LANE") {
+            self.llm.lane = v;
         }
         if let Ok(v) = std::env::var("RAYA_SERVER_PORT")
             && let Ok(port) = v.parse::<u16>()
@@ -262,24 +266,134 @@ impl Default for ResourcesConfig {
     }
 }
 
+/// Named OpenAI-compatible backend (local or remote).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LlmLane {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    /// Optional env var name for the API key (defaults to `RAYA_LLM_API_KEY` / `OPENAI_API_KEY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+}
+
+/// Resolved active lane after config / env selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLlmLane {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct LlmConfig {
-    /// `"mock"` or `"openai"`.
+    /// `"mock"`, `"openai"`, or `"local"` (`local` uses the OpenAI-compatible client).
     pub provider: String,
+    /// Active lane name when [`Self::lanes`] is non-empty.
+    pub lane: String,
     pub base_url: String,
     pub model: String,
     pub timeout_seconds: u64,
+    /// Named backends; empty means use top-level `base_url` / `model`.
+    pub lanes: Vec<LlmLane>,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             provider: "mock".into(),
+            lane: String::new(),
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4o-mini".into(),
             timeout_seconds: 120,
+            lanes: Vec::new(),
         }
+    }
+}
+
+impl LlmConfig {
+    fn validate_lanes(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for lane in &self.lanes {
+            if lane.name.trim().is_empty() {
+                return Err(
+                    ConfigError::Validation("llm.lanes[].name must be non-empty".into()).into(),
+                );
+            }
+            if lane.base_url.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "llm.lanes[{}].base_url must be non-empty",
+                    lane.name
+                ))
+                .into());
+            }
+            if lane.model.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "llm.lanes[{}].model must be non-empty",
+                    lane.name
+                ))
+                .into());
+            }
+            if !seen.insert(lane.name.clone()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate llm.lanes name \"{}\"",
+                    lane.name
+                ))
+                .into());
+            }
+        }
+        if !self.lane.is_empty() && !self.lanes.is_empty() {
+            let exists = self.lanes.iter().any(|l| l.name == self.lane);
+            if !exists {
+                return Err(ConfigError::Validation(format!(
+                    "llm.lane \"{}\" not found in llm.lanes",
+                    self.lane
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the active lane (named entry or legacy top-level `base_url` / `model`).
+    pub fn resolve_lane(&self) -> Result<ResolvedLlmLane> {
+        if self.lanes.is_empty() {
+            return Ok(ResolvedLlmLane {
+                name: if self.lane.is_empty() {
+                    "default".into()
+                } else {
+                    self.lane.clone()
+                },
+                base_url: self.base_url.clone(),
+                model: self.model.clone(),
+                api_key_env: None,
+            });
+        }
+        let name = if self.lane.is_empty() {
+            self.lanes[0].name.clone()
+        } else {
+            self.lane.clone()
+        };
+        let lane = self.lanes.iter().find(|l| l.name == name).ok_or_else(|| {
+            ConfigError::Validation(format!("llm.lane \"{name}\" not found in llm.lanes"))
+        })?;
+        Ok(ResolvedLlmLane {
+            name: lane.name.clone(),
+            base_url: lane.base_url.clone(),
+            model: lane.model.clone(),
+            api_key_env: lane.api_key_env.clone(),
+        })
+    }
+
+    /// Copy the active lane's `base_url` / `model` onto the top-level fields for consumers.
+    pub fn apply_active_lane(&mut self) -> Result<()> {
+        let resolved = self.resolve_lane()?;
+        self.lane = resolved.name;
+        self.base_url = resolved.base_url;
+        self.model = resolved.model;
+        Ok(())
     }
 }
 
@@ -310,6 +424,7 @@ impl Default for ServerConfig {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::Path;
     use tempfile::tempdir;
 
     #[test]
@@ -352,5 +467,69 @@ provider = "mock"
         let dir = tempdir().unwrap();
         let cfg = Config::load(dir.path()).unwrap();
         assert_eq!(cfg.agent.max_iterations, 12);
+    }
+
+    #[test]
+    fn accepts_local_provider() {
+        let mut c = Config::default();
+        c.llm.provider = "local".into();
+        c.validate().expect("local ok");
+    }
+
+    #[test]
+    fn rejects_unknown_provider() {
+        let mut c = Config::default();
+        c.llm.provider = "anthropic".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn parses_lanes_and_resolves() {
+        let text = r#"
+[llm]
+provider = "local"
+lane = "ollama"
+timeout_seconds = 60
+
+[[llm.lanes]]
+name = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+model = "llama3.2"
+
+[[llm.lanes]]
+name = "lmstudio"
+base_url = "http://127.0.0.1:1234/v1"
+model = "local-model"
+"#;
+        let mut cfg = Config::from_toml(text, Path::new("test.toml")).unwrap();
+        cfg.validate().unwrap();
+        let resolved = cfg.llm.resolve_lane().unwrap();
+        assert_eq!(resolved.name, "ollama");
+        assert_eq!(resolved.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(resolved.model, "llama3.2");
+        cfg.llm.apply_active_lane().unwrap();
+        assert_eq!(cfg.llm.model, "llama3.2");
+    }
+
+    #[test]
+    fn rejects_unknown_lane_name() {
+        let mut c = Config::default();
+        c.llm.provider = "openai".into();
+        c.llm.lane = "missing".into();
+        c.llm.lanes = vec![LlmLane {
+            name: "ollama".into(),
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "llama3.2".into(),
+            api_key_env: None,
+        }];
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_base_url_when_lanes_empty() {
+        let c = Config::default();
+        let resolved = c.llm.resolve_lane().unwrap();
+        assert_eq!(resolved.name, "default");
+        assert_eq!(resolved.base_url, c.llm.base_url);
     }
 }

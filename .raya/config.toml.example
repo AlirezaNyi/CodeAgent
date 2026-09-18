@@ -36,11 +36,30 @@ max_parallel_agents = 3
 max_processes = 8
 
 [llm]
-# "mock" for offline tests; "openai" for OpenAI-compatible APIs
+# "mock" for offline tests; "openai" or "local" for OpenAI-compatible APIs
+# ("local" is an alias for the same HTTP client — use for Ollama / LM Studio / etc.)
 provider = "mock"
+# Active named lane when [[llm.lanes]] is set (override with RAYA_LLM_LANE)
+# lane = "ollama"
+# Legacy single-endpoint fields (used when lanes is empty / commented out)
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 timeout_seconds = 120
+
+# Optional named backends shared with other local agents.
+# Uncomment, set provider = "local", and pick lane = "...".
+# Loopback hosts do not require RAYA_LLM_API_KEY / OPENAI_API_KEY.
+# For a loopback server that needs a key, set api_key_env = "MY_LOCAL_KEY".
+#
+# [[llm.lanes]]
+# name = "ollama"
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "llama3.2"
+#
+# [[llm.lanes]]
+# name = "lmstudio"
+# base_url = "http://127.0.0.1:1234/v1"
+# model = "local-model"
 
 [server]
 host = "127.0.0.1"

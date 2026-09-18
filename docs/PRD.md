@@ -260,6 +260,7 @@ MVP includes:
 - LLM Gateway abstraction;
 - OpenAI-compatible provider;
 - mock provider;
+- local LLM lanes (named OpenAI-compatible backends; ADR 0010);
 - filesystem tools;
 - search tool using ripgrep;
 - shell tool;

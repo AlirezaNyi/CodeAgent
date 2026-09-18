@@ -389,10 +389,10 @@ pub trait LlmProvider: Send + Sync {
 
 Providers:
 
-- OpenAI;
-- Anthropic;
-- Azure-compatible;
-- Local provider.
+- OpenAI-compatible HTTP (also used for local servers);
+- Mock (offline);
+- Named local **lanes** (see ADR 0010) for Ollama / LM Studio / proxies;
+- Anthropic / Azure-native clients (future).
 
 Use structured outputs wherever possible.
 

@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use raya_core::{CompletionRequest, CompletionResponse, MessageRole, TokenUsage, redact_secrets};
+use raya_core::{
+    CompletionRequest, CompletionResponse, MessageRole, ResolvedLlmLane, TokenUsage, redact_secrets,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -51,23 +53,123 @@ impl OpenAiCompatibleProvider {
     }
 
     /// Build from config + environment (`RAYA_LLM_API_KEY` or `OPENAI_API_KEY`).
+    ///
+    /// Loopback base URLs may omit an API key (placeholder `"local"` is used).
     pub fn from_env(
         base_url: &str,
         model: &str,
         timeout_secs: u64,
         cancel: CancellationToken,
     ) -> LlmResult<Self> {
-        let key = std::env::var("RAYA_LLM_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .map_err(|_| LlmError::Auth)?;
+        Self::from_resolved(
+            &ResolvedLlmLane {
+                name: "default".into(),
+                base_url: base_url.into(),
+                model: model.into(),
+                api_key_env: None,
+            },
+            timeout_secs,
+            cancel,
+        )
+    }
+
+    /// Build from a resolved lane (named backend or legacy top-level fields).
+    pub fn from_resolved(
+        lane: &ResolvedLlmLane,
+        timeout_secs: u64,
+        cancel: CancellationToken,
+    ) -> LlmResult<Self> {
+        let key = resolve_api_key(&lane.base_url, lane.api_key_env.as_deref())?;
         Ok(Self::new(
-            base_url,
+            lane.base_url.as_str(),
             key,
-            model,
+            lane.model.as_str(),
             Duration::from_secs(timeout_secs),
             cancel,
         ))
     }
+
+    /// Best-effort `GET {base_url}/models` for local discovery.
+    pub async fn probe_models(&self) -> LlmResult<Vec<String>> {
+        if self.cancel.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+        let url = format!("{}/models", self.base_url);
+        debug!(%url, "openai-compatible models probe");
+        let req = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .timeout(self.timeout);
+        let response = tokio::select! {
+            _ = self.cancel.cancelled() => return Err(LlmError::Cancelled),
+            res = req.send() => res.map_err(|e| {
+                if e.is_timeout() {
+                    LlmError::Timeout
+                } else {
+                    LlmError::Http(redact_secrets(&e.to_string()))
+                }
+            })?,
+        };
+        let status = response.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(LlmError::Auth);
+        }
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(LlmError::Http(format!(
+                "status {status}: {}",
+                redact_secrets(&text)
+            )));
+        }
+        let parsed: ModelsResponse = response
+            .json()
+            .await
+            .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
+        Ok(parsed.data.into_iter().map(|m| m.id).collect())
+    }
+}
+
+/// True when `base_url` targets a loopback host (no cloud API key required).
+pub fn is_loopback_base_url(base_url: &str) -> bool {
+    let Some(host) = extract_host(base_url) else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")
+}
+
+fn extract_host(base_url: &str) -> Option<String> {
+    let rest = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+        .unwrap_or(base_url);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(inner) = authority.strip_prefix('[') {
+        let end = inner.find(']')?;
+        return Some(inner[..end].to_string());
+    }
+    Some(authority.split(':').next().unwrap_or(authority).to_string())
+}
+
+fn resolve_api_key(base_url: &str, api_key_env: Option<&str>) -> LlmResult<String> {
+    if let Some(name) = api_key_env {
+        return std::env::var(name).map_err(|_| LlmError::Auth);
+    }
+    // Do not forward ambient cloud keys to loopback servers (Ollama, etc.).
+    if is_loopback_base_url(base_url) {
+        return Ok("local".into());
+    }
+    if let Ok(key) = std::env::var("RAYA_LLM_API_KEY") {
+        return Ok(key);
+    }
+    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        return Ok(key);
+    }
+    Err(LlmError::Auth)
 }
 
 #[derive(Serialize)]
@@ -117,6 +219,17 @@ struct Usage {
     completion_tokens: u64,
     #[serde(default)]
     total_tokens: u64,
+}
+
+#[derive(Deserialize)]
+struct ModelsResponse {
+    #[serde(default)]
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
 }
 
 #[async_trait]
@@ -234,6 +347,31 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn detects_loopback_hosts() {
+        assert!(is_loopback_base_url("http://127.0.0.1:11434/v1"));
+        assert!(is_loopback_base_url("http://localhost:1234/v1"));
+        assert!(is_loopback_base_url("http://[::1]:8080/v1"));
+        assert!(!is_loopback_base_url("https://api.openai.com/v1"));
+    }
+
+    #[test]
+    fn loopback_allows_missing_api_key() {
+        let key = resolve_api_key("http://127.0.0.1:11434/v1", None).unwrap();
+        assert!(!key.is_empty());
+    }
+
+    #[test]
+    fn non_loopback_requires_api_key_without_env() {
+        if std::env::var("RAYA_LLM_API_KEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        assert!(matches!(
+            resolve_api_key("https://api.openai.com/v1", None),
+            Err(LlmError::Auth)
+        ));
+    }
+
     #[tokio::test]
     async fn completes_via_http() {
         let server = MockServer::start().await;
@@ -275,5 +413,27 @@ mod tests {
         let dbg = format!("{provider:?}");
         assert!(!dbg.contains("test-key"));
         assert!(dbg.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn probes_models() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"id": "llama3.2"}, {"id": "codellama"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = OpenAiCompatibleProvider::new(
+            server.uri(),
+            "local",
+            "llama3.2",
+            Duration::from_secs(5),
+            CancellationToken::new(),
+        );
+        let models = provider.probe_models().await.unwrap();
+        assert_eq!(models, vec!["llama3.2", "codellama"]);
     }
 }
