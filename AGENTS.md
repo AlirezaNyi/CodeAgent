@@ -6,6 +6,7 @@
 - Keep durable plans in `.raya/PLAN.md` (checkbox + `{#id}` convention).
 - Sensitive tools may pause for `raya agent approve <task-id> <call-id>` (auto-resumes; `--deny` / `--no-resume` available). Use `raya agent resume <task-id>` to continue a waiting task.
 - Memory: `raya agent memory list|search|add|forget` (bounded FTS recall; see ADR 0012).
+- Optional DAG: `raya agent dag <task-id>` when a plan includes `nodes` (ADR 0013).
 - Inspect history with `raya agent logs`, `raya agent activity`, and `raya agent receipt`.
 
 ## Repository map
@@ -63,7 +64,7 @@ Do not break without an intentional, versioned change:
 - Tool names: `filesystem.read|write|patch`, `search.grep`, `git.status|diff`, `shell.exec`, `test.run`, `build.run`
 - `EventKind::as_str` strings and `EvidenceKind` defaults
 - `MockProvider::default_script` (offline e2e / CLI mock provider)
-- CLI clap tree and HTTP routes under `/v1/` (including `POST /v1/tasks/{id}/approve`, `GET /v1/projects/{id}/memory`)
+- CLI clap tree and HTTP routes under `/v1/` (including `POST /v1/tasks/{id}/approve`, `GET /v1/tasks/{id}/dag`, `GET /v1/projects/{id}/memory`)
 - `prompts/system.md` `AgentDecision` JSON schema (`plan` | `tool_call` | `delegate` | `finish` | `needs_fix`)
 
 ## Product templates vs Cursor config

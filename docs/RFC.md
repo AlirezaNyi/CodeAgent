@@ -353,7 +353,9 @@ Do not duplicate the complete parent context.
 
 **Slice A (ADR 0011):** implemented in-process under `raya-agent::subagent` with role allowlists, `ModelRouter` over named lanes, deterministic `review_on_finish` / `debug_on_verify_fail` (default off), and LLM `AgentDecision::Delegate`.
 
-**Slice B (ADR 0012):** durable approval checkpoints + resume across processes; SQLite Memory (`task` / `project` / `decision` / `agent`) with bounded FTS recall. Full DAG / MCP remain later Phase 3 slices.
+**Slice B (ADR 0012):** durable approval checkpoints + resume across processes; SQLite Memory (`task` / `project` / `decision` / `agent`) with bounded FTS recall.
+
+**Slice C (ADR 0013):** optional `ExecutionPlan.nodes` DAG over in-process subagents (wave scheduler, `task_dag_nodes` status). MCP remains a later Phase 3 slice.
 
 ## 13. Execution DAG
 
@@ -378,6 +380,8 @@ Tests    Review
 ```
 
 The DAG is optional for simple tasks.
+
+**Slice C (ADR 0013):** plans may include additive `nodes: [{id, role, objective, paths, depends_on}]`. Empty/omitted nodes keep the sequential parent LLM loop. The orchestrator runs ready nodes in waves via existing subagents (`subagent.max_parallel`, `max_dag_nodes`). Status is persisted in `task_dag_nodes` for `raya agent dag` / `GET /v1/tasks/{id}/dag`. Failed nodes skip dependents; the parent task is not auto-failed. Crash-resume of an in-flight DAG is out of scope for this slice.
 
 ## 14. LLM Gateway
 
