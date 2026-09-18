@@ -163,15 +163,20 @@ impl Orchestrator {
         let mut messages: Vec<Message>;
         let mut pending_approval: Option<ToolCall>;
         let mut review_rounds: u32;
-        let resuming = task.phase == TaskPhase::WaitingApproval;
-        if !resuming && task.phase != TaskPhase::Created {
+        let approval_resume = task.phase == TaskPhase::WaitingApproval;
+        let dag_resume = !approval_resume
+            && !task.phase.is_terminal()
+            && task.phase != TaskPhase::Created
+            && self.dag_has_incomplete(task_id)?;
+
+        if !approval_resume && !dag_resume && task.phase != TaskPhase::Created {
             return Err(OrchestratorError::Message(format!(
-                "cannot run task in phase {phase:?}; expected created or waiting_approval",
+                "cannot run task in phase {phase:?}; expected created, waiting_approval, or non-terminal with incomplete DAG",
                 phase = task.phase
             )));
         }
 
-        if resuming {
+        if approval_resume {
             let cp = self.store.load_checkpoint(task_id)?.ok_or_else(|| {
                 OrchestratorError::Message(
                     "task is waiting_approval but no checkpoint was found; cannot resume".into(),
@@ -185,6 +190,22 @@ impl Orchestrator {
                 EventKind::PhaseChanged,
                 json!({"resumed": true, "phase": "waiting_approval"}),
             ))?;
+            let _ = resources.add_tokens(task.tokens_used);
+        } else if dag_resume {
+            let cp = self.store.load_checkpoint(task_id)?.ok_or_else(|| {
+                OrchestratorError::Message(
+                    "task has incomplete DAG but no checkpoint was found; cannot resume".into(),
+                )
+            })?;
+            messages = cp.messages;
+            pending_approval = None;
+            review_rounds = cp.review_rounds;
+            self.store.append_event(&Event::new(
+                task_id,
+                EventKind::PhaseChanged,
+                json!({"resumed": true, "dag": true}),
+            ))?;
+            self.store.reset_running_dag_nodes(task_id)?;
             let _ = resources.add_tokens(task.tokens_used);
         } else {
             self.store
@@ -307,6 +328,28 @@ impl Orchestrator {
                 }
             }
 
+            // Crash-resume: finish remaining DAG waves before asking the parent LLM again.
+            if task.phase != TaskPhase::WaitingApproval && self.dag_has_incomplete(task_id)? {
+                match self
+                    .resume_incomplete_dag(&task, &resources, &cancel, &messages, review_rounds)
+                    .await
+                {
+                    Ok(Some(report)) => {
+                        messages.push(Message::user(report));
+                    }
+                    Ok(None) => {}
+                    Err(OrchestratorError::Cancelled) => {
+                        return self.finish_cancelled(task).await;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "DAG resume failed");
+                        messages.push(Message::user(format!(
+                            "DAG resume failed ({e}). Continue with tool_call or finish."
+                        )));
+                    }
+                }
+            }
+
             let iter = resources
                 .bump_iteration()
                 .map_err(OrchestratorError::Resource)?;
@@ -400,7 +443,14 @@ impl Orchestrator {
                     ))?;
                     self.record_decision_memory(&task, &plan);
                     if let Some(report) = self
-                        .maybe_run_dag(&task, &plan.nodes, &resources, &cancel)
+                        .maybe_run_dag(
+                            &task,
+                            &plan.nodes,
+                            &resources,
+                            &cancel,
+                            &messages,
+                            review_rounds,
+                        )
                         .await
                     {
                         messages.push(Message::user(report));
@@ -500,7 +550,14 @@ impl Orchestrator {
                         ))?;
                         self.record_decision_memory(&task, plan);
                         if let Some(report) = self
-                            .maybe_run_dag(&task, &plan.nodes, &resources, &cancel)
+                            .maybe_run_dag(
+                                &task,
+                                &plan.nodes,
+                                &resources,
+                                &cancel,
+                                &messages,
+                                review_rounds,
+                            )
                             .await
                         {
                             messages.push(Message::user(format!(
@@ -737,6 +794,62 @@ impl Orchestrator {
         }
     }
 
+    fn dag_has_incomplete(&self, task_id: TaskId) -> Result<bool, OrchestratorError> {
+        Ok(self.store.has_incomplete_dag(task_id)?)
+    }
+
+    fn dag_nodes_for_task(&self, task: &AgentTask) -> Result<Vec<DagNode>, OrchestratorError> {
+        if let Some(plan) = &task.plan
+            && !plan.nodes.is_empty()
+        {
+            return Ok(plan.nodes.clone());
+        }
+        let records = self.store.list_dag_nodes(task.id)?;
+        Ok(records
+            .into_iter()
+            .map(|r| DagNode {
+                id: r.node_id,
+                role: r.role,
+                objective: r.objective,
+                paths: r.paths,
+                depends_on: r.depends_on,
+            })
+            .collect())
+    }
+
+    /// Resume any incomplete DAG rows before the parent LLM turn.
+    async fn resume_incomplete_dag(
+        &self,
+        task: &AgentTask,
+        resources: &Arc<ResourceManager>,
+        cancel: &CancellationToken,
+        messages: &[Message],
+        review_rounds: u32,
+    ) -> Result<Option<String>, OrchestratorError> {
+        let nodes = self.dag_nodes_for_task(task)?;
+        if nodes.is_empty() {
+            return Ok(None);
+        }
+        if let Err(e) = validate_dag(&nodes, self.config.subagent.max_dag_nodes) {
+            warn!(error = %e, "invalid plan DAG on resume; skipping scheduler");
+            return Ok(Some(format!(
+                "DAG resume skipped ({e}). Continue with tool_call or finish."
+            )));
+        }
+        let report = self
+            .run_plan_dag(
+                task,
+                &nodes,
+                resources,
+                cancel,
+                true,
+                messages,
+                review_rounds,
+            )
+            .await?;
+        Ok(Some(report))
+    }
+
     /// Run optional plan DAG if nodes are non-empty and valid.
     /// Returns a user-message report, or None when DAG is skipped.
     async fn maybe_run_dag(
@@ -745,6 +858,8 @@ impl Orchestrator {
         nodes: &[DagNode],
         resources: &Arc<ResourceManager>,
         cancel: &CancellationToken,
+        messages: &[Message],
+        review_rounds: u32,
     ) -> Option<String> {
         if nodes.is_empty() {
             return None;
@@ -755,7 +870,18 @@ impl Orchestrator {
                 "Plan recorded, but DAG was skipped ({e}). Continue with tool_call or finish."
             ));
         }
-        match self.run_plan_dag(task, nodes, resources, cancel).await {
+        match self
+            .run_plan_dag(
+                task,
+                nodes,
+                resources,
+                cancel,
+                false,
+                messages,
+                review_rounds,
+            )
+            .await
+        {
             Ok(report) => Some(report),
             Err(e) => {
                 warn!(error = %e, "DAG execution failed");
@@ -766,20 +892,59 @@ impl Orchestrator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_plan_dag(
         &self,
         task: &AgentTask,
         nodes: &[DagNode],
         resources: &Arc<ResourceManager>,
         cancel: &CancellationToken,
+        resume: bool,
+        messages: &[Message],
+        review_rounds: u32,
     ) -> Result<String, OrchestratorError> {
-        self.store.replace_dag(task.id, nodes)?;
-        let mut status: std::collections::HashMap<String, DagNodeStatus> = nodes
-            .iter()
-            .map(|n| (n.id.clone(), DagNodeStatus::Pending))
-            .collect();
-        let mut summaries: std::collections::HashMap<String, (bool, String, String)> =
-            std::collections::HashMap::new();
+        // Checkpoint so a process crash can resume remaining waves.
+        self.persist_checkpoint(task.id, messages, None, review_rounds)?;
+
+        let mut status: std::collections::HashMap<String, DagNodeStatus>;
+        let mut summaries: std::collections::HashMap<String, (bool, String, String)>;
+
+        if resume {
+            let _ = self.store.reset_running_dag_nodes(task.id)?;
+            let records = self.store.list_dag_nodes(task.id)?;
+            status = std::collections::HashMap::new();
+            summaries = std::collections::HashMap::new();
+            for r in records {
+                status.insert(r.node_id.clone(), r.status);
+                match r.status {
+                    DagNodeStatus::Completed => {
+                        summaries.insert(
+                            r.node_id,
+                            (
+                                true,
+                                r.role,
+                                r.summary.unwrap_or_else(|| "completed".into()),
+                            ),
+                        );
+                    }
+                    DagNodeStatus::Failed | DagNodeStatus::Skipped => {
+                        let fallback = r.status.as_str().to_string();
+                        summaries.insert(r.node_id, (false, r.role, r.summary.unwrap_or(fallback)));
+                    }
+                    DagNodeStatus::Pending | DagNodeStatus::Running => {}
+                }
+            }
+            for n in nodes {
+                status.entry(n.id.clone()).or_insert(DagNodeStatus::Pending);
+            }
+        } else {
+            self.store.replace_dag(task.id, nodes)?;
+            status = nodes
+                .iter()
+                .map(|n| (n.id.clone(), DagNodeStatus::Pending))
+                .collect();
+            summaries = std::collections::HashMap::new();
+        }
 
         while !all_terminal(&status) {
             if cancel.is_cancelled() || self.store.is_cancel_requested(task.id).unwrap_or(false) {

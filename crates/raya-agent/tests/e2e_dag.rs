@@ -256,3 +256,153 @@ async fn parallel_dag_two_roles() {
     assert!(dag_ids.contains(&"write".to_string()));
     assert!(dag_ids.contains(&"review".to_string()));
 }
+
+#[tokio::test]
+async fn dag_crash_resume_continues_remaining_nodes() {
+    use raya_core::{
+        DagNode, DagNodeStatus, ExecutionPlan, Message, PlanStep, TaskCheckpoint,
+        VerificationStrategy,
+    };
+
+    let dir = tempdir().unwrap();
+    let config = base_config(dir.path());
+    let store = Arc::new(Store::open(dir.path().join(".raya/raya.db")).unwrap());
+    let project = store.get_or_create_project(dir.path(), "demo").unwrap();
+    let tools = Arc::new(default_registry(PolicyEngine::new(config.policy.clone())));
+
+    let task = AgentTask::new(
+        project.id,
+        "Write a and b via dag",
+        20,
+        40,
+        100_000,
+        40_000,
+        None,
+    );
+    let id = task.id;
+    store.create_task(&task).unwrap();
+
+    // Advance to Executing as if the parent had planned and started the DAG.
+    store
+        .transition_task(id, TaskPhase::Created, TaskPhase::Planning)
+        .unwrap();
+    store
+        .transition_task(id, TaskPhase::Planning, TaskPhase::ContextBuilding)
+        .unwrap();
+    store
+        .transition_task(id, TaskPhase::ContextBuilding, TaskPhase::Executing)
+        .unwrap();
+
+    let plan = ExecutionPlan {
+        steps: vec![PlanStep {
+            id: "1".into(),
+            description: "dag".into(),
+            expected_tools: vec![],
+        }],
+        verification: VerificationStrategy::None,
+        summary: Some("two files via dag".into()),
+        nodes: vec![
+            DagNode {
+                id: "a".into(),
+                role: "coder".into(),
+                objective: "Write file a.txt with content alpha".into(),
+                paths: vec![],
+                depends_on: vec![],
+            },
+            DagNode {
+                id: "b".into(),
+                role: "coder".into(),
+                objective: "Write file b.txt with content beta".into(),
+                paths: vec![],
+                depends_on: vec!["a".into()],
+            },
+        ],
+    };
+    let mut task = store.get_task(id).unwrap().unwrap();
+    task.plan = Some(plan.clone());
+    store.update_task(&task).unwrap();
+
+    store.replace_dag(id, &plan.nodes).unwrap();
+    assert!(
+        store
+            .set_dag_node_status(id, "a", DagNodeStatus::Completed, Some("wrote a.txt"))
+            .unwrap()
+    );
+    assert!(
+        store
+            .set_dag_node_status(id, "b", DagNodeStatus::Running, None)
+            .unwrap()
+    );
+    // Node a already "completed" before the crash.
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+
+    let cp = TaskCheckpoint::new(
+        id,
+        vec![
+            Message::system("system"),
+            Message::user("Write a and b via dag"),
+            Message::assistant(
+                r#"{"type":"plan","plan":{"steps":[{"id":"1","description":"dag","expected_tools":[]}],"verification":"none","summary":"two files via dag","nodes":[{"id":"a","role":"coder","objective":"Write file a.txt with content alpha","paths":[],"depends_on":[]},{"id":"b","role":"coder","objective":"Write file b.txt with content beta","paths":[],"depends_on":["a"]}]}}"#,
+            ),
+        ],
+        None,
+    );
+    store.save_checkpoint(&cp).unwrap();
+
+    // Second run: only remaining node b + parent finish.
+    let llm = Arc::new(MockProvider::new(vec![
+        resp(json!({
+            "type": "tool_call",
+            "call": {
+                "id": "00000000-0000-4000-8000-0000000000b1",
+                "name": "filesystem.write",
+                "input": {"path": "b.txt", "content": "beta\n"}
+            }
+        })),
+        resp(json!({"type": "finish", "summary": "wrote b.txt"})),
+        resp(json!({"type": "finish", "summary": "dag resumed done"})),
+    ]));
+    let router = Arc::new(ModelRouter::single(llm));
+
+    let orch = Orchestrator::with_router(
+        store.clone(),
+        tools,
+        router,
+        config,
+        dir.path().to_path_buf(),
+    );
+    let finished = orch
+        .run(id, CancellationToken::new())
+        .await
+        .expect("orchestrator resume");
+
+    assert_eq!(finished.phase, TaskPhase::Completed);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("b.txt"))
+            .unwrap()
+            .trim(),
+        "beta"
+    );
+    // Terminal cleanup removes DAG rows (running cleared + deleted).
+    assert!(store.list_dag_nodes(id).unwrap().is_empty());
+
+    let events = store.list_events(id, None, 300).unwrap();
+    let resumed = events.iter().any(|(_, e)| {
+        e.kind == EventKind::PhaseChanged
+            && e.payload.get("resumed") == Some(&json!(true))
+            && e.payload.get("dag") == Some(&json!(true))
+    });
+    assert!(resumed, "expected dag resume PhaseChanged event");
+
+    let dag_spawns: Vec<_> = events
+        .iter()
+        .filter(|(_, e)| e.kind == EventKind::AgentSpawned)
+        .filter_map(|(_, e)| {
+            e.payload
+                .get("dag_node_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    assert_eq!(dag_spawns, vec!["b".to_string()]);
+}

@@ -603,6 +603,41 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Reset nodes stuck in `running` (dead process) back to `pending` for crash-resume.
+    pub fn reset_running_dag_nodes(&self, task_id: TaskId) -> StoreResult<u32> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE task_dag_nodes SET status = ?1, summary = NULL, updated_at = ?2
+             WHERE task_id = ?3 AND status = ?4",
+            params![
+                DagNodeStatus::Pending.as_str(),
+                Utc::now().to_rfc3339(),
+                task_id.to_string(),
+                DagNodeStatus::Running.as_str(),
+            ],
+        )?;
+        Ok(n as u32)
+    }
+
+    /// True if any DAG node for the task is still `pending` or `running`.
+    pub fn has_incomplete_dag(&self, task_id: TaskId) -> StoreResult<bool> {
+        let conn = self.lock()?;
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM task_dag_nodes
+             WHERE task_id = ?1 AND status IN (?2, ?3)
+             LIMIT 1",
+                params![
+                    task_id.to_string(),
+                    DagNodeStatus::Pending.as_str(),
+                    DagNodeStatus::Running.as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     pub fn upsert_memory(&self, mem: &MemoryRecord) -> StoreResult<()> {
         let conn = self.lock()?;
         let tags = serde_json::to_string(&mem.tags)
@@ -1281,5 +1316,58 @@ mod tests {
         assert_eq!(store.list_dag_nodes(task_id).unwrap().len(), 2);
         assert!(store.delete_dag(task_id).unwrap());
         assert!(store.list_dag_nodes(task_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dag_reset_running_and_has_incomplete() {
+        use raya_core::DagNode;
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("dag-resume.db")).unwrap();
+        let project = store.create_project(dir.path(), "proj").unwrap();
+        let task = sample_task(project.id);
+        store.create_task(&task).unwrap();
+        let nodes = vec![
+            DagNode {
+                id: "a".into(),
+                role: "coder".into(),
+                objective: "write A".into(),
+                paths: vec![],
+                depends_on: vec![],
+            },
+            DagNode {
+                id: "b".into(),
+                role: "coder".into(),
+                objective: "write B".into(),
+                paths: vec![],
+                depends_on: vec!["a".into()],
+            },
+        ];
+        store.replace_dag(task.id, &nodes).unwrap();
+        assert!(store.has_incomplete_dag(task.id).unwrap());
+
+        store
+            .set_dag_node_status(task.id, "a", DagNodeStatus::Running, Some("in progress"))
+            .unwrap();
+        store
+            .set_dag_node_status(task.id, "b", DagNodeStatus::Completed, Some("done"))
+            .unwrap();
+
+        let reset = store.reset_running_dag_nodes(task.id).unwrap();
+        assert_eq!(reset, 1);
+
+        let listed = store.list_dag_nodes(task.id).unwrap();
+        let a = listed.iter().find(|n| n.node_id == "a").unwrap();
+        assert_eq!(a.status, DagNodeStatus::Pending);
+        assert!(a.summary.is_none());
+        let b = listed.iter().find(|n| n.node_id == "b").unwrap();
+        assert_eq!(b.status, DagNodeStatus::Completed);
+        assert_eq!(b.summary.as_deref(), Some("done"));
+
+        assert!(store.has_incomplete_dag(task.id).unwrap());
+        store
+            .set_dag_node_status(task.id, "a", DagNodeStatus::Completed, Some("done A"))
+            .unwrap();
+        assert!(!store.has_incomplete_dag(task.id).unwrap());
+        assert_eq!(store.reset_running_dag_nodes(task.id).unwrap(), 0);
     }
 }
