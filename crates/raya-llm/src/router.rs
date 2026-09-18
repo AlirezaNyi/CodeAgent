@@ -69,6 +69,23 @@ impl ModelRouter {
         }
     }
 
+    /// Build a router with per-role provider overrides (tests / custom wiring).
+    ///
+    /// Roles not listed use `default`.
+    pub fn with_role_providers(
+        default: Arc<dyn LlmProvider>,
+        overrides: impl IntoIterator<Item = (ModelRole, Arc<dyn LlmProvider>)>,
+    ) -> Self {
+        let mut router = Self::single(default);
+        for (role, provider) in overrides {
+            router.by_role.insert(role, provider);
+            router
+                .lanes
+                .insert(role, format!("override-{}", role.as_str()));
+        }
+        router
+    }
+
     /// Build from project config.
     ///
     /// - `mock` → one shared [`MockProvider::default_script`] for all roles.

@@ -16,5 +16,8 @@ Example tool_call:
 Example plan:
 {"type":"plan","plan":{"steps":[{"id":"1","description":"...","expected_tools":["filesystem.write"]}],"verification":"test","summary":"..."}}
 
+Example plan with optional DAG nodes (bounded subagents; empty/omitted nodes = sequential tools only):
+{"type":"plan","plan":{"steps":[{"id":"1","description":"...","expected_tools":[]}],"verification":"none","summary":"...","nodes":[{"id":"a","role":"coder","objective":"Write a.txt","paths":[],"depends_on":[]},{"id":"b","role":"coder","objective":"Write b.txt","paths":[],"depends_on":["a"]}]}}
+
 Example delegate (bounded subagent):
 {"type":"delegate","role":"reviewer","objective":"Review the latest changes","paths":["src/main.rs"]}

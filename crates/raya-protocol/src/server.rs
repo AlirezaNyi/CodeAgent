@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/tasks/{id}", get(get_task))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/tasks/{id}/approve", post(approve_task))
+        .route("/v1/tasks/{id}/dag", get(get_task_dag))
         .route("/v1/tasks/{id}/events", get(list_events))
         .route("/v1/projects", post(create_project))
         .route("/v1/projects/{id}/index", post(index_project))
@@ -290,6 +291,19 @@ async fn approve_task(
             "resumed": true,
         })),
     ))
+}
+
+async fn get_task_dag(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tid: TaskId = id.parse().map_err(|_| ApiError::bad("invalid task id"))?;
+    let _ = state
+        .store
+        .get_task(tid)?
+        .ok_or_else(|| ApiError::not_found("task not found"))?;
+    let nodes = state.store.list_dag_nodes(tid)?;
+    Ok(Json(serde_json::json!({ "nodes": nodes })))
 }
 
 #[derive(Debug, Deserialize)]

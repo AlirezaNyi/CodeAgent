@@ -15,6 +15,9 @@ pub struct SubagentBrief {
     pub context_paths: Vec<String>,
     /// Extra free-text context (e.g. verification output, parent summary).
     pub extra_context: String,
+    /// When set, included in `agent.spawned` / `agent.completed` payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dag_node_id: Option<String>,
 }
 
 impl SubagentBrief {
@@ -24,6 +27,7 @@ impl SubagentBrief {
             objective: objective.into(),
             context_paths: Vec::new(),
             extra_context: String::new(),
+            dag_node_id: None,
         }
     }
 
@@ -34,6 +38,11 @@ impl SubagentBrief {
 
     pub fn with_extra(mut self, extra: impl Into<String>) -> Self {
         self.extra_context = extra.into();
+        self
+    }
+
+    pub fn with_dag_node(mut self, node_id: impl Into<String>) -> Self {
+        self.dag_node_id = Some(node_id.into());
         self
     }
 }

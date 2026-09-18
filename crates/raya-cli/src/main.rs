@@ -88,6 +88,8 @@ enum AgentCommands {
     },
     /// Resume a task waiting for approval (or continue from checkpoint).
     Resume { task_id: String },
+    /// Show optional execution DAG node status for a task.
+    Dag { task_id: String },
     /// Index the repository (hashes, FTS5, symbols).
     Index,
     /// Recent file/tool activity across tasks.
@@ -390,6 +392,29 @@ async fn run() -> Result<ExitCode> {
                 let finished = orch.run(tid, cancel).await.context("orchestrator resume")?;
                 print_task(cli.json, &finished);
                 Ok(exit_for_phase(finished.phase))
+            }
+            AgentCommands::Dag { task_id } => {
+                let tid: TaskId = task_id.parse().context("task id")?;
+                let _ = store
+                    .get_task(tid)?
+                    .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+                let nodes = store.list_dag_nodes(tid)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&nodes)?);
+                } else if nodes.is_empty() {
+                    println!("(no dag nodes)");
+                } else {
+                    for n in nodes {
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            n.node_id,
+                            n.role,
+                            n.status.as_str(),
+                            n.summary.as_deref().unwrap_or("")
+                        );
+                    }
+                }
+                Ok(ExitCode::SUCCESS)
             }
             AgentCommands::Index => {
                 let stats = raya_index::index_project(&store, project.path())

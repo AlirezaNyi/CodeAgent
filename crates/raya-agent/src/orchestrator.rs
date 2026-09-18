@@ -7,9 +7,10 @@ use std::time::Duration;
 use chrono::Utc;
 use raya_context::{ContextEngine, RankSignals};
 use raya_core::{
-    AgentDecision, AgentTask, CompletionRequest, Config, Event, EventKind, HeuristicCounter,
-    MemoryKind, MemoryRecord, Message, TaskCheckpoint, TaskId, TaskPhase, TokenCounter, ToolCall,
-    ToolCallId, VerificationStrategy, redact_secrets, write_plan_file,
+    AgentDecision, AgentTask, CompletionRequest, Config, DagNode, DagNodeStatus, Event, EventKind,
+    HeuristicCounter, MemoryKind, MemoryRecord, Message, TaskCheckpoint, TaskId, TaskPhase,
+    TokenCounter, ToolCall, ToolCallId, VerificationStrategy, redact_secrets, validate_dag,
+    write_plan_file,
 };
 use raya_index::{find_symbols, fts_search};
 use raya_llm::{LlmProvider, ModelRole, ModelRouter};
@@ -17,11 +18,15 @@ use raya_store::Store;
 use raya_tools::{ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 use thiserror::Error;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::resources::{ResourceLimits, ResourceManager};
-use crate::subagent::{SubagentBrief, SubagentRole, SubagentRunner, SubagentVerdict};
+use crate::subagent::{
+    SubagentBrief, SubagentRole, SubagentRunner, SubagentVerdict, all_terminal, ready_nodes,
+    skip_blocked,
+};
 
 const SYSTEM_PROMPT: &str = include_str!("../../../prompts/system.md");
 const CHECKPOINT_MESSAGE_CAP: usize = 40;
@@ -142,14 +147,14 @@ impl Orchestrator {
             .get_task(task_id)?
             .ok_or_else(|| OrchestratorError::TaskNotFound(task_id.to_string()))?;
 
-        let resources = ResourceManager::new(ResourceLimits {
+        let resources = Arc::new(ResourceManager::new(ResourceLimits {
             max_parallel_tools: self.config.resources.max_parallel_tools,
             max_parallel_agents: self.config.subagent.max_parallel,
             max_processes: self.config.resources.max_processes,
             max_iterations: task.max_iterations,
             max_tool_calls: task.max_tool_calls,
             max_tokens: task.max_tokens,
-        });
+        }));
 
         let deadline = task.deadline.unwrap_or_else(|| {
             Utc::now() + chrono::Duration::seconds(self.config.agent.timeout_seconds as i64)
@@ -394,10 +399,17 @@ impl Orchestrator {
                         }),
                     ))?;
                     self.record_decision_memory(&task, &plan);
-                    messages.push(Message::user(
-                        "Plan recorded (also written to .raya/PLAN.md). Execute the next step with a tool_call or finish when done."
-                            .to_string(),
-                    ));
+                    if let Some(report) = self
+                        .maybe_run_dag(&task, &plan.nodes, &resources, &cancel)
+                        .await
+                    {
+                        messages.push(Message::user(report));
+                    } else {
+                        messages.push(Message::user(
+                            "Plan recorded (also written to .raya/PLAN.md). Execute the next step with a tool_call or finish when done."
+                                .to_string(),
+                        ));
+                    }
                 }
                 AgentDecision::ToolCall { mut call } => {
                     if call.id.as_uuid().is_nil() {
@@ -487,6 +499,18 @@ impl Orchestrator {
                             }),
                         ))?;
                         self.record_decision_memory(&task, plan);
+                        if let Some(report) = self
+                            .maybe_run_dag(&task, &plan.nodes, &resources, &cancel)
+                            .await
+                        {
+                            messages.push(Message::user(format!(
+                                "Subagent {} result (ok={}): {}\n\n{report}",
+                                sub_role.as_str(),
+                                outcome.ok,
+                                outcome.summary
+                            )));
+                            continue;
+                        }
                     }
 
                     messages.push(Message::user(format!(
@@ -544,6 +568,7 @@ impl Orchestrator {
                         self.store.update_task(&task)?;
                         self.record_task_memory(&task, &final_summary);
                         let _ = self.store.delete_checkpoint(task_id);
+                        let _ = self.store.delete_dag(task_id);
                         return self.transition(task, TaskPhase::Completed);
                     }
 
@@ -712,6 +737,166 @@ impl Orchestrator {
         }
     }
 
+    /// Run optional plan DAG if nodes are non-empty and valid.
+    /// Returns a user-message report, or None when DAG is skipped.
+    async fn maybe_run_dag(
+        &self,
+        task: &AgentTask,
+        nodes: &[DagNode],
+        resources: &Arc<ResourceManager>,
+        cancel: &CancellationToken,
+    ) -> Option<String> {
+        if nodes.is_empty() {
+            return None;
+        }
+        if let Err(e) = validate_dag(nodes, self.config.subagent.max_dag_nodes) {
+            warn!(error = %e, "invalid plan DAG; skipping scheduler");
+            return Some(format!(
+                "Plan recorded, but DAG was skipped ({e}). Continue with tool_call or finish."
+            ));
+        }
+        match self.run_plan_dag(task, nodes, resources, cancel).await {
+            Ok(report) => Some(report),
+            Err(e) => {
+                warn!(error = %e, "DAG execution failed");
+                Some(format!(
+                    "Plan recorded, but DAG failed ({e}). Continue with tool_call or finish."
+                ))
+            }
+        }
+    }
+
+    async fn run_plan_dag(
+        &self,
+        task: &AgentTask,
+        nodes: &[DagNode],
+        resources: &Arc<ResourceManager>,
+        cancel: &CancellationToken,
+    ) -> Result<String, OrchestratorError> {
+        self.store.replace_dag(task.id, nodes)?;
+        let mut status: std::collections::HashMap<String, DagNodeStatus> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), DagNodeStatus::Pending))
+            .collect();
+        let mut summaries: std::collections::HashMap<String, (bool, String, String)> =
+            std::collections::HashMap::new();
+
+        while !all_terminal(&status) {
+            if cancel.is_cancelled() || self.store.is_cancel_requested(task.id).unwrap_or(false) {
+                return Err(OrchestratorError::Cancelled);
+            }
+
+            let ready = ready_nodes(nodes, &status);
+            if ready.is_empty() {
+                let skipped = skip_blocked(nodes, &mut status);
+                for id in &skipped {
+                    let _ = self.store.set_dag_node_status(
+                        task.id,
+                        id,
+                        DagNodeStatus::Skipped,
+                        Some("skipped due to failed dependency"),
+                    );
+                    summaries.insert(
+                        id.clone(),
+                        (
+                            false,
+                            "skipped".into(),
+                            "skipped due to failed dependency".into(),
+                        ),
+                    );
+                }
+                if skipped.is_empty() && !all_terminal(&status) {
+                    // Deadlock safety: mark remaining pending as skipped.
+                    for (id, st) in status.iter_mut() {
+                        if *st == DagNodeStatus::Pending {
+                            *st = DagNodeStatus::Skipped;
+                            let _ = self.store.set_dag_node_status(
+                                task.id,
+                                id,
+                                DagNodeStatus::Skipped,
+                                Some("skipped (unreachable)"),
+                            );
+                            summaries.insert(
+                                id.clone(),
+                                (false, "skipped".into(), "unreachable".into()),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let mut set = JoinSet::new();
+            for node in ready {
+                let _ =
+                    self.store
+                        .set_dag_node_status(task.id, &node.id, DagNodeStatus::Running, None);
+                status.insert(node.id.clone(), DagNodeStatus::Running);
+
+                let role = SubagentRole::parse(&node.role).ok_or_else(|| {
+                    OrchestratorError::Message(format!("invalid dag role {}", node.role))
+                })?;
+                let brief = SubagentBrief::new(role, node.objective.clone())
+                    .with_paths(node.paths.clone())
+                    .with_dag_node(node.id.clone());
+
+                let store = self.store.clone();
+                let tools = self.tools.clone();
+                let router = self.router.clone();
+                let config = self.config.clone();
+                let root = self.project_root.clone();
+                let task_clone = task.clone();
+                let resources = resources.clone();
+                let cancel = cancel.clone();
+                let node_id = node.id.clone();
+                let role_str = role.as_str().to_string();
+
+                set.spawn(async move {
+                    let runner = SubagentRunner {
+                        store: store.as_ref(),
+                        tools: tools.as_ref(),
+                        router: router.as_ref(),
+                        config: &config,
+                        project_root: &root,
+                        task: &task_clone,
+                    };
+                    let outcome = runner.run(brief, resources.as_ref(), &cancel).await;
+                    (node_id, role_str, outcome)
+                });
+            }
+
+            while let Some(joined) = set.join_next().await {
+                let (node_id, role_str, outcome) = joined
+                    .map_err(|e| OrchestratorError::Message(format!("dag join error: {e}")))?;
+                let st = if outcome.ok {
+                    DagNodeStatus::Completed
+                } else {
+                    DagNodeStatus::Failed
+                };
+                let _ = self.store.set_dag_node_status(
+                    task.id,
+                    &node_id,
+                    st,
+                    Some(outcome.summary.as_str()),
+                );
+                status.insert(node_id.clone(), st);
+                summaries.insert(node_id, (outcome.ok, role_str, outcome.summary));
+            }
+        }
+
+        let mut lines = vec!["DAG completed:".to_string()];
+        for n in nodes {
+            let (ok, role, summary) = summaries.get(&n.id).cloned().unwrap_or((
+                false,
+                n.role.clone(),
+                "no result".into(),
+            ));
+            lines.push(format!("- [{}] {role} ok={ok}: {summary}", n.id));
+        }
+        lines.push("Continue with tool_call, delegate, or finish.".into());
+        Ok(lines.join("\n"))
+    }
+
     async fn run_subagent(
         &self,
         task: &AgentTask,
@@ -720,9 +905,9 @@ impl Orchestrator {
         cancel: &CancellationToken,
     ) -> crate::subagent::SubagentOutcome {
         let runner = SubagentRunner {
-            store: &self.store,
-            tools: &self.tools,
-            router: &self.router,
+            store: self.store.as_ref(),
+            tools: self.tools.as_ref(),
+            router: self.router.as_ref(),
             config: &self.config,
             project_root: &self.project_root,
             task,
@@ -903,6 +1088,7 @@ impl Orchestrator {
 
     async fn finish_cancelled(&self, mut task: AgentTask) -> Result<AgentTask, OrchestratorError> {
         let _ = self.store.delete_checkpoint(task.id);
+        let _ = self.store.delete_dag(task.id);
         if !task.phase.is_terminal() {
             if task.phase.can_transition_to(TaskPhase::Cancelled) {
                 task = self.transition(task, TaskPhase::Cancelled)?;
@@ -922,6 +1108,7 @@ impl Orchestrator {
 
     async fn fail(&self, mut task: AgentTask) -> Result<AgentTask, OrchestratorError> {
         let _ = self.store.delete_checkpoint(task.id);
+        let _ = self.store.delete_dag(task.id);
         if task.phase.can_transition_to(TaskPhase::Failed) {
             task = self.transition(task, TaskPhase::Failed)?;
         } else {

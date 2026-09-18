@@ -55,17 +55,19 @@ impl<'a> SubagentRunner<'a> {
             }
         };
 
-        let _ = self.store.append_event(&Event::new(
-            self.task.id,
-            EventKind::AgentSpawned,
-            json!({
-                "agent_id": agent_id,
-                "role": role.as_str(),
-                "objective": brief.objective,
-                "lane": self.router.lane_for(model_role),
-                "model": self.router.model_for(model_role),
-            }),
-        ));
+        let mut spawned = json!({
+            "agent_id": agent_id,
+            "role": role.as_str(),
+            "objective": brief.objective,
+            "lane": self.router.lane_for(model_role),
+            "model": self.router.model_for(model_role),
+        });
+        if let Some(node_id) = &brief.dag_node_id {
+            spawned["dag_node_id"] = json!(node_id);
+        }
+        let _ =
+            self.store
+                .append_event(&Event::new(self.task.id, EventKind::AgentSpawned, spawned));
 
         let child = cancel.child_token();
         let timeout_secs = self.config.subagent.timeout_seconds;
@@ -80,18 +82,22 @@ impl<'a> SubagentRunner<'a> {
 
         drop(permit);
 
+        let mut completed = json!({
+            "agent_id": outcome.agent_id,
+            "role": outcome.role.as_str(),
+            "ok": outcome.ok,
+            "summary": outcome.summary,
+            "tool_calls": outcome.tool_calls,
+            "tokens": outcome.tokens_used,
+            "duration_ms": outcome.duration_ms,
+        });
+        if let Some(node_id) = &brief.dag_node_id {
+            completed["dag_node_id"] = json!(node_id);
+        }
         let _ = self.store.append_event(&Event::new(
             self.task.id,
             EventKind::AgentCompleted,
-            json!({
-                "agent_id": outcome.agent_id,
-                "role": outcome.role.as_str(),
-                "ok": outcome.ok,
-                "summary": outcome.summary,
-                "tool_calls": outcome.tool_calls,
-                "tokens": outcome.tokens_used,
-                "duration_ms": outcome.duration_ms,
-            }),
+            completed,
         ));
 
         if outcome.tokens_used > 0 {
